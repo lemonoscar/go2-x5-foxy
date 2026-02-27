@@ -17,6 +17,7 @@ endif()
 
 if(NOT USE_CMAKE)
     if($ENV{ROS_DISTRO} MATCHES "foxy")
+        add_compile_definitions(USE_ROS)
         add_compile_definitions(USE_ROS2)
     else()
         message(FATAL_ERROR "rl_ras_n supports ROS2 Foxy only. Current ROS_DISTRO=$ENV{ROS_DISTRO}")
