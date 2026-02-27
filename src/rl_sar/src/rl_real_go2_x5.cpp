@@ -115,6 +115,20 @@ RL_Real_Go2X5::~RL_Real_Go2X5()
 #ifdef PLOT
     this->loop_plot->shutdown();
 #endif
+    // Restore built-in motion service so wireless controller can take over after process exit.
+    if (!this->QueryMotionStatus())
+    {
+        int32_t ret = this->msc.SelectMode("normal");
+        if (ret == 0)
+        {
+            std::cout << LOGGER::INFO << "Restored motion service: normal(sport_mode)" << std::endl;
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING
+                      << "Failed to restore motion service with alias 'normal', error: " << ret << std::endl;
+        }
+    }
     std::cout << LOGGER::INFO << "RL_Real_Go2X5 exit" << std::endl;
 }
 
