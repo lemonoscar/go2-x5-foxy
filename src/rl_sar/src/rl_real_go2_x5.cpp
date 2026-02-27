@@ -119,6 +119,10 @@ RL_Real_Go2X5::~RL_Real_Go2X5()
     if (!this->QueryMotionStatus())
     {
         int32_t ret = this->msc.SelectMode("normal");
+        if (ret != 0)
+        {
+            ret = this->msc.SelectMode("sport_mode");
+        }
         if (ret == 0)
         {
             std::cout << LOGGER::INFO << "Restored motion service: normal(sport_mode)" << std::endl;
