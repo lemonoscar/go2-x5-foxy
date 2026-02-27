@@ -281,7 +281,8 @@ create_libtorch_from_pytorch() {
     local python_cmd=""
 
     # Try to detect PyTorch installation
-    for py_cmd in python3 python; do
+    local detect_candidates=("/usr/bin/python3" "python3" "python")
+    for py_cmd in "${detect_candidates[@]}"; do
         if command -v $py_cmd &> /dev/null; then
             torch_path=$($py_cmd -c "import torch, os; print(os.path.dirname(torch.__file__))" 2>/dev/null || echo "")
             if [ -n "$torch_path" ] && [ -d "$torch_path" ]; then
@@ -385,7 +386,8 @@ main() {
     # Check if PyTorch is already installed
     print_info "Checking for existing PyTorch installation..."
     local torch_exists=false
-    for py_cmd in python3 python; do
+    local detect_candidates=("/usr/bin/python3" "python3" "python")
+    for py_cmd in "${detect_candidates[@]}"; do
         if command -v $py_cmd &> /dev/null; then
             if $py_cmd -c "import torch" 2>/dev/null; then
                 torch_exists=true
