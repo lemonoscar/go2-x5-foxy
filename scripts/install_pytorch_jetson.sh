@@ -64,49 +64,109 @@ detect_jetpack_version() {
     echo "$jetpack_version"
 }
 
+# Function: Resolve Python ABI tag used in NVIDIA wheel names (e.g. 38, 310)
+get_python_tag_for_cmd() {
+    local py_cmd="$1"
+    if ! command -v "$py_cmd" &> /dev/null; then
+        return 1
+    fi
+    "$py_cmd" -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null
+}
+
+# Function: Choose a wheel python tag for the current JetPack.
+# NOTE:
+# - JetPack 5.x (R34/R35) commonly provides wheels for CPython 3.8.
+# - JetPack 4.x (R32) commonly provides wheels for CPython 3.6.
+select_wheel_python_tag() {
+    local jetpack_ver="$1"
+    local python_tag=""
+
+    case "$jetpack_ver" in
+        35|34)
+            python_tag="38"
+            ;;
+        32)
+            python_tag="36"
+            ;;
+        *)
+            # Fallback to current environment python if unknown JetPack.
+            python_tag=$(get_python_tag_for_cmd python3 || true)
+            [ -z "$python_tag" ] && python_tag=$(get_python_tag_for_cmd python || true)
+            [ -z "$python_tag" ] && python_tag="38"
+            ;;
+    esac
+
+    echo "$python_tag"
+}
+
 # Function: Get PyTorch wheel URL for JetPack version
 get_pytorch_wheel_url() {
     local jetpack_ver="$1"
+    local python_tag="$2"
     local wheel_url=""
-    local python_version=""
-
-    # Detect Python version
-    for py_cmd in python3 python; do
-        if command -v $py_cmd &> /dev/null; then
-            python_version=$($py_cmd -c "import sys; print(f'{sys.version_info.major}{sys.version_info.minor}')" 2>/dev/null || echo "")
-            if [ -n "$python_version" ]; then
-                break
-            fi
-        fi
-    done
-
-    # Default to Python 3.8 if detection fails
-    if [ -z "$python_version" ]; then
-        python_version="38"
-    fi
+    [ -z "$python_tag" ] && python_tag="38"
 
     # Map JetPack version to PyTorch wheel
     case "$jetpack_ver" in
         35)
             # JetPack 5.1.x (L4T R35.x) - PyTorch 2.1.0
-            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp${python_version}-cp${python_version}-linux_aarch64.whl"
+            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp${python_tag}-cp${python_tag}-linux_aarch64.whl"
             ;;
         34)
             # JetPack 5.0.x (L4T R34.x) - PyTorch 2.0.0
-            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v50/pytorch/torch-2.0.0+nv23.05-cp${python_version}-cp${python_version}-linux_aarch64.whl"
+            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v50/pytorch/torch-2.0.0+nv23.05-cp${python_tag}-cp${python_tag}-linux_aarch64.whl"
             ;;
         32)
             # JetPack 4.6.x (L4T R32.x) - PyTorch 1.13.0
-            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v461/pytorch/torch-1.13.0a0+340c4120.nv22.06-cp${python_version}-cp${python_version}-linux_aarch64.whl"
+            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v461/pytorch/torch-1.13.0a0+340c4120.nv22.06-cp${python_tag}-cp${python_tag}-linux_aarch64.whl"
             ;;
         *)
             # Default to JetPack 5.1.2 for unknown versions
             print_warning "Unknown JetPack version: R${jetpack_ver}, using default PyTorch 2.1.0"
-            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp${python_version}-cp${python_version}-linux_aarch64.whl"
+            wheel_url="https://developer.download.nvidia.cn/compute/redist/jp/v512/pytorch/torch-2.1.0a0+41361538.nv23.06-cp${python_tag}-cp${python_tag}-linux_aarch64.whl"
             ;;
     esac
 
     echo "$wheel_url"
+}
+
+# Function: Verify downloaded wheel is valid (not an HTML error page)
+verify_downloaded_wheel() {
+    local wheel_path="$1"
+
+    if [ ! -f "$wheel_path" ]; then
+        print_error "Wheel file missing: $wheel_path"
+        return 1
+    fi
+
+    local file_size=0
+    file_size=$(stat -c%s "$wheel_path" 2>/dev/null || wc -c < "$wheel_path")
+    if [ "$file_size" -lt 1048576 ]; then
+        print_error "Downloaded file is too small (${file_size} bytes), likely not a real wheel"
+        return 1
+    fi
+
+    if command -v unzip &> /dev/null; then
+        if ! unzip -tq "$wheel_path" >/dev/null 2>&1; then
+            print_error "Downloaded wheel failed zip integrity check"
+            return 1
+        fi
+    else
+        if ! python3 - "$wheel_path" <<'PY'
+import sys, zipfile
+try:
+    with zipfile.ZipFile(sys.argv[1], "r") as zf:
+        zf.testzip()
+except Exception:
+    sys.exit(1)
+PY
+        then
+            print_error "Downloaded wheel failed archive integrity check"
+            return 1
+        fi
+    fi
+
+    return 0
 }
 
 # Function: Install PyTorch on Jetson
@@ -126,8 +186,13 @@ install_pytorch_jetson() {
 
     print_info "Detected JetPack version: R${jetpack_ver}"
 
-    # Get PyTorch wheel URL
-    local wheel_url=$(get_pytorch_wheel_url "$jetpack_ver")
+    # Resolve wheel tag and URL
+    local wheel_python_tag
+    wheel_python_tag=$(select_wheel_python_tag "$jetpack_ver")
+    print_info "Selected wheel CPython tag: cp${wheel_python_tag}"
+
+    local wheel_url
+    wheel_url=$(get_pytorch_wheel_url "$jetpack_ver" "$wheel_python_tag")
     local wheel_name=$(basename "$wheel_url")
     local wheel_path="${TEMP_DIR}/${wheel_name}"
 
@@ -160,18 +225,36 @@ install_pytorch_jetson() {
         return 1
     fi
 
+    if ! verify_downloaded_wheel "${wheel_path}"; then
+        rm -f "${wheel_path}"
+        print_error "Invalid wheel download. This usually means URL/Python tag mismatch."
+        print_info "If you are in a Conda py310 env on JetPack 5, use cp38 wheel with /usr/bin/python3."
+        return 1
+    fi
+
     # Install PyTorch wheel
     print_info "Installing PyTorch wheel..."
 
-    # Try with different Python commands
+    # Install with interpreters matching wheel CPython tag only.
+    local detected_wheel_tag=""
+    detected_wheel_tag=$(echo "${wheel_name}" | sed -n 's/.*-cp\([0-9][0-9][0-9]\?\)-cp\1-.*/\1/p')
+    [ -z "$detected_wheel_tag" ] && detected_wheel_tag="$wheel_python_tag"
+
+    local install_candidates=("/usr/bin/python3" "python3" "python")
     local install_success=false
-    for py_cmd in python3 python; do
-        if command -v $py_cmd &> /dev/null; then
-            print_info "Installing with ${py_cmd}..."
-            if $py_cmd -m pip install --user "${wheel_path}" 2>&1 | tee /dev/tty | grep -q "Successfully installed"; then
-                install_success=true
-                break
-            fi
+    for py_cmd in "${install_candidates[@]}"; do
+        if ! command -v "$py_cmd" &> /dev/null; then
+            continue
+        fi
+        local cmd_tag=""
+        cmd_tag=$(get_python_tag_for_cmd "$py_cmd" || true)
+        if [ -z "$cmd_tag" ] || [ "$cmd_tag" != "$detected_wheel_tag" ]; then
+            continue
+        fi
+        print_info "Installing with ${py_cmd} (cp${cmd_tag})..."
+        if "$py_cmd" -m pip install --user "${wheel_path}"; then
+            install_success=true
+            break
         fi
     done
 
@@ -180,8 +263,9 @@ install_pytorch_jetson() {
 
     if [ "$install_success" = false ]; then
         print_error "Failed to install PyTorch wheel"
+        print_error "No matching Python interpreter found for cp${detected_wheel_tag}, or pip install failed."
         print_info "You may need to install it manually:"
-        print_info "  pip install ${wheel_url}"
+        print_info "  /usr/bin/python3 -m pip install --user ${wheel_url}"
         return 1
     fi
 
@@ -336,4 +420,3 @@ main() {
 
 # Run main function
 main "$@"
-
