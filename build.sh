@@ -10,6 +10,19 @@ source "${SCRIPT_DIR}/scripts/common.sh"
 # ========================
 # Configuration
 # ========================
+# By default, do not download prebuilt artifacts from GitHub HTTPS release URLs.
+# This can be overridden per-run: NO_GITHUB_HTTPS=false ./build.sh
+: "${NO_GITHUB_HTTPS:=true}"
+
+is_jetson_platform() {
+    if [ "${IS_JETSON}" = "true" ]; then
+        return 0
+    fi
+    if [ -f /etc/nv_tegra_release ]; then
+        return 0
+    fi
+    return 1
+}
 
 # ========================
 # Build Functions
@@ -23,7 +36,15 @@ setup_inference_runtime() {
 
     if [ -f "$DOWNLOAD_SCRIPT" ]; then
         print_info "Checking inference libraries..."
-        bash "$DOWNLOAD_SCRIPT" || {
+        # Avoid GitHub HTTPS downloads in Foxy/Jetson workflow:
+        # - ONNX prebuilt package is downloaded from GitHub release URLs.
+        # - LibTorch/Jetson path does not require GitHub HTTPS.
+        local download_target="all"
+        if is_jetson_platform || [ "${NO_GITHUB_HTTPS}" = "true" ]; then
+            download_target="libtorch"
+            print_info "NO_GITHUB_HTTPS mode enabled: only setting up LibTorch (skip ONNX download from GitHub HTTPS)."
+        fi
+        bash "$DOWNLOAD_SCRIPT" "$download_target" || {
             print_error "Failed to setup inference libraries"
             exit 1
         }
