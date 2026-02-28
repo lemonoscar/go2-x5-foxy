@@ -100,39 +100,60 @@ void RL_Real::GetState(RobotState<float> *state)
         this->rt_keys_record_ = this->rt_keys_;
         this->first_flag_ = false;
     }
-    if (this->rt_keys_.A != this->rt_keys_record_.A) this->control.SetGamepad(Input::Gamepad::A);
-    if (this->rt_keys_.B != this->rt_keys_record_.B) this->control.SetGamepad(Input::Gamepad::B);
-    if (this->rt_keys_.X != this->rt_keys_record_.X) this->control.SetGamepad(Input::Gamepad::X);
-    if (this->rt_keys_.Y != this->rt_keys_record_.Y) this->control.SetGamepad(Input::Gamepad::Y);
-    if (this->rt_keys_.L1 != this->rt_keys_record_.L1) this->control.SetGamepad(Input::Gamepad::LB);
-    if (this->rt_keys_.R1 != this->rt_keys_record_.R1) this->control.SetGamepad(Input::Gamepad::RB);
-    if (this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button) this->control.SetGamepad(Input::Gamepad::LStick);
-    if (this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button) this->control.SetGamepad(Input::Gamepad::RStick);
-    if (this->rt_keys_.up != this->rt_keys_record_.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
-    if (this->rt_keys_.down != this->rt_keys_record_.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
-    if (this->rt_keys_.left != this->rt_keys_record_.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
-    if (this->rt_keys_.right != this->rt_keys_record_.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::LB_A);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::LB_B);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::LB_X);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::LB_Y);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_LStick);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::LB_RStick);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
-    if ((this->rt_keys_.L1 != this->rt_keys_record_.L1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.A != this->rt_keys_record_.A)) this->control.SetGamepad(Input::Gamepad::RB_A);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.B != this->rt_keys_record_.B)) this->control.SetGamepad(Input::Gamepad::RB_B);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.X != this->rt_keys_record_.X)) this->control.SetGamepad(Input::Gamepad::RB_X);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.Y != this->rt_keys_record_.Y)) this->control.SetGamepad(Input::Gamepad::RB_Y);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left_axis_button != this->rt_keys_record_.left_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_LStick);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right_axis_button != this->rt_keys_record_.right_axis_button)) this->control.SetGamepad(Input::Gamepad::RB_RStick);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.up != this->rt_keys_record_.up)) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.down != this->rt_keys_record_.down)) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.left != this->rt_keys_record_.left)) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.right != this->rt_keys_record_.right)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-    if ((this->rt_keys_.R1 != this->rt_keys_record_.R1)&&(this->rt_keys_.R1 != this->rt_keys_record_.R1)) this->control.SetGamepad(Input::Gamepad::LB_RB);
+    auto pressed = [](auto current, auto previous) -> bool
+    {
+        return static_cast<bool>(current) && !static_cast<bool>(previous);
+    };
+
+    const bool a_pressed = pressed(this->rt_keys_.A, this->rt_keys_record_.A);
+    const bool b_pressed = pressed(this->rt_keys_.B, this->rt_keys_record_.B);
+    const bool x_pressed = pressed(this->rt_keys_.X, this->rt_keys_record_.X);
+    const bool y_pressed = pressed(this->rt_keys_.Y, this->rt_keys_record_.Y);
+    const bool l1_pressed = pressed(this->rt_keys_.L1, this->rt_keys_record_.L1);
+    const bool r1_pressed = pressed(this->rt_keys_.R1, this->rt_keys_record_.R1);
+    const bool l_stick_pressed = pressed(this->rt_keys_.left_axis_button, this->rt_keys_record_.left_axis_button);
+    const bool r_stick_pressed = pressed(this->rt_keys_.right_axis_button, this->rt_keys_record_.right_axis_button);
+    const bool up_pressed = pressed(this->rt_keys_.up, this->rt_keys_record_.up);
+    const bool down_pressed = pressed(this->rt_keys_.down, this->rt_keys_record_.down);
+    const bool left_pressed = pressed(this->rt_keys_.left, this->rt_keys_record_.left);
+    const bool right_pressed = pressed(this->rt_keys_.right, this->rt_keys_record_.right);
+
+    if (a_pressed) this->control.SetGamepad(Input::Gamepad::A);
+    if (b_pressed) this->control.SetGamepad(Input::Gamepad::B);
+    if (x_pressed) this->control.SetGamepad(Input::Gamepad::X);
+    if (y_pressed) this->control.SetGamepad(Input::Gamepad::Y);
+    if (l1_pressed) this->control.SetGamepad(Input::Gamepad::LB);
+    if (r1_pressed) this->control.SetGamepad(Input::Gamepad::RB);
+    if (l_stick_pressed) this->control.SetGamepad(Input::Gamepad::LStick);
+    if (r_stick_pressed) this->control.SetGamepad(Input::Gamepad::RStick);
+    if (up_pressed) this->control.SetGamepad(Input::Gamepad::DPadUp);
+    if (down_pressed) this->control.SetGamepad(Input::Gamepad::DPadDown);
+    if (left_pressed) this->control.SetGamepad(Input::Gamepad::DPadLeft);
+    if (right_pressed) this->control.SetGamepad(Input::Gamepad::DPadRight);
+
+    const bool l1_down = static_cast<bool>(this->rt_keys_.L1);
+    const bool r1_down = static_cast<bool>(this->rt_keys_.R1);
+    if (l1_down && static_cast<bool>(this->rt_keys_.A) && (l1_pressed || a_pressed)) this->control.SetGamepad(Input::Gamepad::LB_A);
+    if (l1_down && static_cast<bool>(this->rt_keys_.B) && (l1_pressed || b_pressed)) this->control.SetGamepad(Input::Gamepad::LB_B);
+    if (l1_down && static_cast<bool>(this->rt_keys_.X) && (l1_pressed || x_pressed)) this->control.SetGamepad(Input::Gamepad::LB_X);
+    if (l1_down && static_cast<bool>(this->rt_keys_.Y) && (l1_pressed || y_pressed)) this->control.SetGamepad(Input::Gamepad::LB_Y);
+    if (l1_down && static_cast<bool>(this->rt_keys_.left_axis_button) && (l1_pressed || l_stick_pressed)) this->control.SetGamepad(Input::Gamepad::LB_LStick);
+    if (l1_down && static_cast<bool>(this->rt_keys_.right_axis_button) && (l1_pressed || r_stick_pressed)) this->control.SetGamepad(Input::Gamepad::LB_RStick);
+    if (l1_down && static_cast<bool>(this->rt_keys_.up) && (l1_pressed || up_pressed)) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
+    if (l1_down && static_cast<bool>(this->rt_keys_.down) && (l1_pressed || down_pressed)) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
+    if (l1_down && static_cast<bool>(this->rt_keys_.left) && (l1_pressed || left_pressed)) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
+    if (l1_down && static_cast<bool>(this->rt_keys_.right) && (l1_pressed || right_pressed)) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
+    if (r1_down && static_cast<bool>(this->rt_keys_.A) && (r1_pressed || a_pressed)) this->control.SetGamepad(Input::Gamepad::RB_A);
+    if (r1_down && static_cast<bool>(this->rt_keys_.B) && (r1_pressed || b_pressed)) this->control.SetGamepad(Input::Gamepad::RB_B);
+    if (r1_down && static_cast<bool>(this->rt_keys_.X) && (r1_pressed || x_pressed)) this->control.SetGamepad(Input::Gamepad::RB_X);
+    if (r1_down && static_cast<bool>(this->rt_keys_.Y) && (r1_pressed || y_pressed)) this->control.SetGamepad(Input::Gamepad::RB_Y);
+    if (r1_down && static_cast<bool>(this->rt_keys_.left_axis_button) && (r1_pressed || l_stick_pressed)) this->control.SetGamepad(Input::Gamepad::RB_LStick);
+    if (r1_down && static_cast<bool>(this->rt_keys_.right_axis_button) && (r1_pressed || r_stick_pressed)) this->control.SetGamepad(Input::Gamepad::RB_RStick);
+    if (r1_down && static_cast<bool>(this->rt_keys_.up) && (r1_pressed || up_pressed)) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
+    if (r1_down && static_cast<bool>(this->rt_keys_.down) && (r1_pressed || down_pressed)) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
+    if (r1_down && static_cast<bool>(this->rt_keys_.left) && (r1_pressed || left_pressed)) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
+    if (r1_down && static_cast<bool>(this->rt_keys_.right) && (r1_pressed || right_pressed)) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
+    if (l1_down && r1_down && (l1_pressed || r1_pressed)) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
     this->control.x = this->rt_keys_.left_axis_y;
     this->control.y = -this->rt_keys_.left_axis_x;
@@ -156,6 +177,7 @@ void RL_Real::GetState(RobotState<float> *state)
         state->motor_state.dq[i] = this->robot_data_->joint_data.joint_data[this->params.Get<std::vector<int>>("joint_mapping")[i]].velocity;
         state->motor_state.tau_est[i] = this->robot_data_->joint_data.joint_data[this->params.Get<std::vector<int>>("joint_mapping")[i]].torque;
     }
+    this->rt_keys_record_ = this->rt_keys_;
 }
 
 void RL_Real::SetCommand(const RobotCommand<float> *command)

@@ -174,6 +174,7 @@ private:
     std::mutex cmd_vel_mutex;
     std::mutex arm_command_mutex;
     std::mutex arm_external_state_mutex;
+    std::mutex unitree_state_mutex;
 
 #if defined(USE_ROS1) && defined(USE_ROS)
     std::shared_ptr<ros::NodeHandle> ros1_nh;

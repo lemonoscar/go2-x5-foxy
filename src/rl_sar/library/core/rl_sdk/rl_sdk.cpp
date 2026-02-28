@@ -84,11 +84,18 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
             this->control.last_keyboard = Input::Keyboard::Num5;
         }
     }
-    if (this->control.current_keyboard == Input::Keyboard::N || this->control.current_gamepad == Input::Gamepad::X)
+    const bool nav_keyboard_down = (this->control.current_keyboard == Input::Keyboard::N);
+    const bool nav_gamepad_down = (this->control.current_gamepad == Input::Gamepad::X);
+    const bool nav_toggle_requested =
+        (nav_keyboard_down && !this->control.nav_keyboard_latched) ||
+        (nav_gamepad_down && !this->control.nav_gamepad_latched);
+    if (nav_toggle_requested)
     {
         this->control.navigation_mode = !this->control.navigation_mode;
         std::cout << std::endl << LOGGER::INFO << "Navigation mode: " << (this->control.navigation_mode ? "ON" : "OFF") << std::endl;
     }
+    this->control.nav_keyboard_latched = nav_keyboard_down;
+    this->control.nav_gamepad_latched = nav_gamepad_down;
 }
 
 std::vector<float> RL::ComputeObservation()
@@ -128,7 +135,10 @@ std::vector<float> RL::ComputeObservation()
             std::vector<float> dof_pos_rel = this->obs.dof_pos - this->params.Get<std::vector<float>>("default_dof_pos");
             for (int i : this->params.Get<std::vector<int>>("wheel_indices"))
             {
-                dof_pos_rel[i] = 0.0f;
+                if (i >= 0 && i < static_cast<int>(dof_pos_rel.size()))
+                {
+                    dof_pos_rel[static_cast<size_t>(i)] = 0.0f;
+                }
             }
             obs_list.push_back(dof_pos_rel * this->params.Get<float>("dof_pos_scale"));
         }
@@ -161,8 +171,19 @@ std::vector<float> RL::ComputeObservation()
                 std::vector<float> joint_vel_training(joint_mapping.size());
                 for (size_t i = 0; i < joint_mapping.size(); ++i)
                 {
-                    joint_pos_training[i] = joint_pos_sdk[joint_mapping[i]];
-                    joint_vel_training[i] = joint_vel_sdk[joint_mapping[i]];
+                    const int mapped = joint_mapping[i];
+                    if (mapped >= 0 &&
+                        mapped < static_cast<int>(joint_pos_sdk.size()) &&
+                        mapped < static_cast<int>(joint_vel_sdk.size()))
+                    {
+                        joint_pos_training[i] = joint_pos_sdk[static_cast<size_t>(mapped)];
+                        joint_vel_training[i] = joint_vel_sdk[static_cast<size_t>(mapped)];
+                    }
+                    else
+                    {
+                        joint_pos_training[i] = 0.0f;
+                        joint_vel_training[i] = 0.0f;
+                    }
                 }
                 motion_cmd.insert(motion_cmd.end(), joint_pos_training.begin(), joint_pos_training.end());
                 motion_cmd.insert(motion_cmd.end(), joint_vel_training.begin(), joint_vel_training.end());
@@ -179,19 +200,33 @@ std::vector<float> RL::ComputeObservation()
             if (this->motion_loader)
             {
                 auto waist_sdk_indices = this->params.Get<std::vector<int>>("waist_joint_indices");
-                std::vector<float> waist_angles = {
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[0])],
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[1])],
-                    this->obs.dof_pos[InverseJointMapping(waist_sdk_indices[2])]
-                };
-                std::vector<float> robot_torso_quat_w = MotionLoader::ComputeTorsoQuat(this->obs.base_quat, waist_angles);
-                std::vector<float> ref_torso_quat_w = this->motion_loader->GetAnchorQuat();
-                std::vector<float> init_quat = this->motion_loader->GetInitQuat();
-                std::vector<float> motion_anchor_quat_w = QuaternionMultiply(init_quat, ref_torso_quat_w);
-                std::vector<float> robot_quat_inv = QuaternionConjugate(robot_torso_quat_w);
-                std::vector<float> relative_quat = QuaternionMultiply(robot_quat_inv, motion_anchor_quat_w);
-                std::vector<float> rot_matrix = QuaternionToRotationMatrix(relative_quat);
-                anchor_ori = MatrixFirstTwoColumns(rot_matrix);
+                if (waist_sdk_indices.size() >= 3)
+                {
+                    const int mapped0 = InverseJointMapping(waist_sdk_indices[0]);
+                    const int mapped1 = InverseJointMapping(waist_sdk_indices[1]);
+                    const int mapped2 = InverseJointMapping(waist_sdk_indices[2]);
+                    const bool valid_mapping =
+                        mapped0 >= 0 && mapped1 >= 0 && mapped2 >= 0 &&
+                        mapped0 < static_cast<int>(this->obs.dof_pos.size()) &&
+                        mapped1 < static_cast<int>(this->obs.dof_pos.size()) &&
+                        mapped2 < static_cast<int>(this->obs.dof_pos.size());
+                    if (valid_mapping)
+                    {
+                        std::vector<float> waist_angles = {
+                            this->obs.dof_pos[static_cast<size_t>(mapped0)],
+                            this->obs.dof_pos[static_cast<size_t>(mapped1)],
+                            this->obs.dof_pos[static_cast<size_t>(mapped2)]
+                        };
+                        std::vector<float> robot_torso_quat_w = MotionLoader::ComputeTorsoQuat(this->obs.base_quat, waist_angles);
+                        std::vector<float> ref_torso_quat_w = this->motion_loader->GetAnchorQuat();
+                        std::vector<float> init_quat = this->motion_loader->GetInitQuat();
+                        std::vector<float> motion_anchor_quat_w = QuaternionMultiply(init_quat, ref_torso_quat_w);
+                        std::vector<float> robot_quat_inv = QuaternionConjugate(robot_torso_quat_w);
+                        std::vector<float> relative_quat = QuaternionMultiply(robot_quat_inv, motion_anchor_quat_w);
+                        std::vector<float> rot_matrix = QuaternionToRotationMatrix(relative_quat);
+                        anchor_ori = MatrixFirstTwoColumns(rot_matrix);
+                    }
+                }
             }
             obs_list.push_back(anchor_ori);
         }
@@ -199,7 +234,11 @@ std::vector<float> RL::ComputeObservation()
         {
             float motion_time = this->episode_length_buf * this->params.Get<float>("dt") * this->params.Get<int>("decimation");
             float count = motion_time;
-            float phase = count / this->motion_length;
+            float phase = 0.0f;
+            if (this->motion_length > 1e-6f)
+            {
+                phase = count / this->motion_length;
+            }
             std::vector<float> phase_vec = {phase};
             obs_list.push_back(phase_vec);
         }
@@ -308,8 +347,14 @@ void RL::ComputeOutput(const std::vector<float> &actions, std::vector<float> &ou
     std::vector<float> vel_actions_scaled(actions.size(), 0.0f);
     for (int i : this->params.Get<std::vector<int>>("wheel_indices"))
     {
-        pos_actions_scaled[i] = 0.0f;
-        vel_actions_scaled[i] = actions_scaled[i];
+        if (i >= 0 &&
+            i < static_cast<int>(pos_actions_scaled.size()) &&
+            i < static_cast<int>(vel_actions_scaled.size()) &&
+            i < static_cast<int>(actions_scaled.size()))
+        {
+            pos_actions_scaled[static_cast<size_t>(i)] = 0.0f;
+            vel_actions_scaled[static_cast<size_t>(i)] = actions_scaled[static_cast<size_t>(i)];
+        }
     }
     std::vector<float> all_actions_scaled = pos_actions_scaled + vel_actions_scaled;
     output_dof_pos = pos_actions_scaled + this->params.Get<std::vector<float>>("default_dof_pos");

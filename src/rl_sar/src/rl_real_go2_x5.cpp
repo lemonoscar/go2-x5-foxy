@@ -588,59 +588,69 @@ bool RL_Real_Go2X5::ArmCommandDifferent(const std::vector<float>& a, const std::
 
 void RL_Real_Go2X5::GetState(RobotState<float> *state)
 {
-    if (this->unitree_joy.components.A) this->control.SetGamepad(Input::Gamepad::A);
-    if (this->unitree_joy.components.B) this->control.SetGamepad(Input::Gamepad::B);
-    if (this->unitree_joy.components.X) this->control.SetGamepad(Input::Gamepad::X);
-    if (this->unitree_joy.components.Y) this->control.SetGamepad(Input::Gamepad::Y);
-    if (this->unitree_joy.components.L1) this->control.SetGamepad(Input::Gamepad::LB);
-    if (this->unitree_joy.components.R1) this->control.SetGamepad(Input::Gamepad::RB);
-    if (this->unitree_joy.components.F1) this->control.SetGamepad(Input::Gamepad::LStick);
-    if (this->unitree_joy.components.F2) this->control.SetGamepad(Input::Gamepad::RStick);
-    if (this->unitree_joy.components.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
-    if (this->unitree_joy.components.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
-    if (this->unitree_joy.components.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
-    if (this->unitree_joy.components.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.A) this->control.SetGamepad(Input::Gamepad::LB_A);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.B) this->control.SetGamepad(Input::Gamepad::LB_B);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.X) this->control.SetGamepad(Input::Gamepad::LB_X);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.Y) this->control.SetGamepad(Input::Gamepad::LB_Y);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.F1) this->control.SetGamepad(Input::Gamepad::LB_LStick);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.F2) this->control.SetGamepad(Input::Gamepad::LB_RStick);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.up) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.down) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.left) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.right) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.A) this->control.SetGamepad(Input::Gamepad::RB_A);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.B) this->control.SetGamepad(Input::Gamepad::RB_B);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.X) this->control.SetGamepad(Input::Gamepad::RB_X);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.Y) this->control.SetGamepad(Input::Gamepad::RB_Y);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.F1) this->control.SetGamepad(Input::Gamepad::RB_LStick);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.F2) this->control.SetGamepad(Input::Gamepad::RB_RStick);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.up) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.down) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.left) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
-    if (this->unitree_joy.components.R1 && this->unitree_joy.components.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-    if (this->unitree_joy.components.L1 && this->unitree_joy.components.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
+    unitree_go::msg::dds_::LowState_ low_state;
+    unitree_go::msg::dds_::WirelessController_ joystick_snapshot;
+    xKeySwitchUnion joy_bits;
+    {
+        std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
+        low_state = this->unitree_low_state;
+        joystick_snapshot = this->joystick;
+        joy_bits = this->unitree_joy;
+    }
 
-    this->control.x = this->joystick.ly();
-    this->control.y = -this->joystick.lx();
-    this->control.yaw = -this->joystick.rx();
+    if (joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::A);
+    if (joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::B);
+    if (joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::X);
+    if (joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::Y);
+    if (joy_bits.components.L1) this->control.SetGamepad(Input::Gamepad::LB);
+    if (joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::RB);
+    if (joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LStick);
+    if (joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RStick);
+    if (joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
+    if (joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
+    if (joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
+    if (joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
+    if (joy_bits.components.L1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::LB_A);
+    if (joy_bits.components.L1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::LB_B);
+    if (joy_bits.components.L1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::LB_X);
+    if (joy_bits.components.L1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::LB_Y);
+    if (joy_bits.components.L1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LB_LStick);
+    if (joy_bits.components.L1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::LB_RStick);
+    if (joy_bits.components.L1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
+    if (joy_bits.components.L1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
+    if (joy_bits.components.L1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
+    if (joy_bits.components.L1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
+    if (joy_bits.components.R1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::RB_A);
+    if (joy_bits.components.R1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::RB_B);
+    if (joy_bits.components.R1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::RB_X);
+    if (joy_bits.components.R1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::RB_Y);
+    if (joy_bits.components.R1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::RB_LStick);
+    if (joy_bits.components.R1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RB_RStick);
+    if (joy_bits.components.R1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
+    if (joy_bits.components.R1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
+    if (joy_bits.components.R1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
+    if (joy_bits.components.R1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
+    if (joy_bits.components.L1 && joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
-    state->imu.quaternion[0] = this->unitree_low_state.imu_state().quaternion()[0]; // w
-    state->imu.quaternion[1] = this->unitree_low_state.imu_state().quaternion()[1]; // x
-    state->imu.quaternion[2] = this->unitree_low_state.imu_state().quaternion()[2]; // y
-    state->imu.quaternion[3] = this->unitree_low_state.imu_state().quaternion()[3]; // z
+    this->control.x = joystick_snapshot.ly();
+    this->control.y = -joystick_snapshot.lx();
+    this->control.yaw = -joystick_snapshot.rx();
+
+    state->imu.quaternion[0] = low_state.imu_state().quaternion()[0]; // w
+    state->imu.quaternion[1] = low_state.imu_state().quaternion()[1]; // x
+    state->imu.quaternion[2] = low_state.imu_state().quaternion()[2]; // y
+    state->imu.quaternion[3] = low_state.imu_state().quaternion()[3]; // z
 
     for (int i = 0; i < 3; ++i)
     {
-        state->imu.gyroscope[i] = this->unitree_low_state.imu_state().gyroscope()[i];
+        state->imu.gyroscope[i] = low_state.imu_state().gyroscope()[i];
     }
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
         const int mapped = this->params.Get<std::vector<int>>("joint_mapping")[i];
-        state->motor_state.q[i] = this->unitree_low_state.motor_state()[mapped].q();
-        state->motor_state.dq[i] = this->unitree_low_state.motor_state()[mapped].dq();
-        state->motor_state.tau_est[i] = this->unitree_low_state.motor_state()[mapped].tau_est();
+        state->motor_state.q[i] = low_state.motor_state()[mapped].q();
+        state->motor_state.dq[i] = low_state.motor_state()[mapped].dq();
+        state->motor_state.tau_est[i] = low_state.motor_state()[mapped].tau_est();
     }
 
     this->ReadArmStateFromExternal(state);
@@ -1052,11 +1062,13 @@ std::string RL_Real_Go2X5::QueryServiceName(std::string form, std::string name)
 
 void RL_Real_Go2X5::LowStateMessageHandler(const void *message)
 {
+    std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
     this->unitree_low_state = *(unitree_go::msg::dds_::LowState_ *)message;
 }
 
 void RL_Real_Go2X5::JoystickHandler(const void *message)
 {
+    std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
     joystick = *(unitree_go::msg::dds_::WirelessController_ *)message;
     this->unitree_joy.value = joystick.keys();
 }

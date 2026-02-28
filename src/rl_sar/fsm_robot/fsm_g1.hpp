@@ -300,10 +300,26 @@ public:
             rl.motion_length = rl.motion_loader->GetDuration();
 
             auto waist_sdk_indices = rl.params.Get<std::vector<int>>("waist_joint_indices");
+            if (waist_sdk_indices.size() < 3)
+            {
+                throw std::runtime_error("waist_joint_indices size must be >= 3");
+            }
+            const int mapped0 = rl.InverseJointMapping(waist_sdk_indices[0]);
+            const int mapped1 = rl.InverseJointMapping(waist_sdk_indices[1]);
+            const int mapped2 = rl.InverseJointMapping(waist_sdk_indices[2]);
+            const bool valid_mapping =
+                mapped0 >= 0 && mapped1 >= 0 && mapped2 >= 0 &&
+                mapped0 < static_cast<int>(fsm_state->motor_state.q.size()) &&
+                mapped1 < static_cast<int>(fsm_state->motor_state.q.size()) &&
+                mapped2 < static_cast<int>(fsm_state->motor_state.q.size());
+            if (!valid_mapping)
+            {
+                throw std::runtime_error("Invalid joint_mapping for waist_joint_indices");
+            }
             std::vector<float> waist_angles = {
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[0])],
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[1])],
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[2])]
+                fsm_state->motor_state.q[static_cast<size_t>(mapped0)],
+                fsm_state->motor_state.q[static_cast<size_t>(mapped1)],
+                fsm_state->motor_state.q[static_cast<size_t>(mapped2)]
             };
             rl.motion_loader->Reset(fsm_state->imu.quaternion, waist_angles);
 
@@ -392,10 +408,26 @@ RLFSMStateRLWholeBodyTrackingGangnamStyle(RL *rl) : RLFSMState(*rl, "RLFSMStateR
             rl.motion_length = rl.motion_loader->GetDuration();
 
             auto waist_sdk_indices = rl.params.Get<std::vector<int>>("waist_joint_indices");
+            if (waist_sdk_indices.size() < 3)
+            {
+                throw std::runtime_error("waist_joint_indices size must be >= 3");
+            }
+            const int mapped0 = rl.InverseJointMapping(waist_sdk_indices[0]);
+            const int mapped1 = rl.InverseJointMapping(waist_sdk_indices[1]);
+            const int mapped2 = rl.InverseJointMapping(waist_sdk_indices[2]);
+            const bool valid_mapping =
+                mapped0 >= 0 && mapped1 >= 0 && mapped2 >= 0 &&
+                mapped0 < static_cast<int>(fsm_state->motor_state.q.size()) &&
+                mapped1 < static_cast<int>(fsm_state->motor_state.q.size()) &&
+                mapped2 < static_cast<int>(fsm_state->motor_state.q.size());
+            if (!valid_mapping)
+            {
+                throw std::runtime_error("Invalid joint_mapping for waist_joint_indices");
+            }
             std::vector<float> waist_angles = {
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[0])],
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[1])],
-                fsm_state->motor_state.q[rl.InverseJointMapping(waist_sdk_indices[2])]
+                fsm_state->motor_state.q[static_cast<size_t>(mapped0)],
+                fsm_state->motor_state.q[static_cast<size_t>(mapped1)],
+                fsm_state->motor_state.q[static_cast<size_t>(mapped2)]
             };
             rl.motion_loader->Reset(fsm_state->imu.quaternion, waist_angles);
 

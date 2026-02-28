@@ -119,6 +119,8 @@ struct Control
     float y = 0.0f;
     float yaw = 0.0f;
     bool navigation_mode = false;
+    bool nav_keyboard_latched = false;
+    bool nav_gamepad_latched = false;
 
     void SetKeyboard(Input::Keyboard keyboad)
     {

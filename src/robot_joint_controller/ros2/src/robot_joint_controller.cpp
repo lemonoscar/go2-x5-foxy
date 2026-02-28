@@ -35,7 +35,7 @@ CallbackReturn RobotJointController::on_configure(const rclcpp_lifecycle::State 
     robot_description_client_ = get_node()->create_client<rcl_interfaces::srv::GetParameters>("/robot_state_publisher/get_parameters");
 
     auto request = std::make_shared<rcl_interfaces::srv::GetParameters::Request>();
-    request->names.push_back("robot_description_");
+    request->names = {"robot_description", "robot_description_"};
 
     while (!robot_description_client_->wait_for_service(std::chrono::seconds(1)))
     {
@@ -48,7 +48,21 @@ CallbackReturn RobotJointController::on_configure(const rclcpp_lifecycle::State 
 
 	auto response_received_callback = [this](rclcpp::Client<rcl_interfaces::srv::GetParameters>::SharedFuture future)
     {
-        std::string robot_description = future.get()->values[0].string_value;
+        const auto response = future.get();
+        std::string robot_description;
+        for (const auto &value : response->values)
+        {
+            if (!value.string_value.empty())
+            {
+                robot_description = value.string_value;
+                break;
+            }
+        }
+        if (robot_description.empty())
+        {
+            RCLCPP_ERROR(get_node()->get_logger(), "robot_description parameter is empty");
+            return;
+        }
         urdf::Model urdf;
         if (!urdf.initString(robot_description))
         {

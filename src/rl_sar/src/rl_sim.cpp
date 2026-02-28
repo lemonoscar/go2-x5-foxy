@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 
 RL_Sim::RL_Sim(int argc, char **argv)
 {
@@ -628,28 +629,45 @@ void RL_Sim::HeightScanCallback(const sensor_msgs::msg::Image::SharedPtr msg)
 
     if (msg->encoding == "32FC1")
     {
-        const float *data = reinterpret_cast<const float *>(msg->data.data());
+        const size_t row_bytes = static_cast<size_t>(src_w) * sizeof(float);
+        if (msg->step < row_bytes)
+        {
+            std::cout << LOGGER::WARNING << "Invalid depth image step for 32FC1: step=" << msg->step
+                      << ", expected at least " << row_bytes << std::endl;
+            return;
+        }
         for (int y = 0; y < copy_h; ++y)
         {
             int sy = this->height_scan_flip_y ? (copy_h - 1 - y) : y;
+            const uint8_t *row_ptr = msg->data.data() + static_cast<size_t>(sy) * msg->step;
             for (int x = 0; x < copy_w; ++x)
             {
                 int sx = this->height_scan_flip_x ? (copy_w - 1 - x) : x;
-                float depth = data[sy * src_w + sx];
+                float depth = 0.0f;
+                std::memcpy(&depth, row_ptr + static_cast<size_t>(sx) * sizeof(float), sizeof(float));
                 set_value(x, y, depth);
             }
         }
     }
     else if (msg->encoding == "16UC1")
     {
-        const uint16_t *data = reinterpret_cast<const uint16_t *>(msg->data.data());
+        const size_t row_bytes = static_cast<size_t>(src_w) * sizeof(uint16_t);
+        if (msg->step < row_bytes)
+        {
+            std::cout << LOGGER::WARNING << "Invalid depth image step for 16UC1: step=" << msg->step
+                      << ", expected at least " << row_bytes << std::endl;
+            return;
+        }
         for (int y = 0; y < copy_h; ++y)
         {
             int sy = this->height_scan_flip_y ? (copy_h - 1 - y) : y;
+            const uint8_t *row_ptr = msg->data.data() + static_cast<size_t>(sy) * msg->step;
             for (int x = 0; x < copy_w; ++x)
             {
                 int sx = this->height_scan_flip_x ? (copy_w - 1 - x) : x;
-                float depth = static_cast<float>(data[sy * src_w + sx]) / 1000.0f;
+                uint16_t depth_mm = 0;
+                std::memcpy(&depth_mm, row_ptr + static_cast<size_t>(sx) * sizeof(uint16_t), sizeof(uint16_t));
+                float depth = static_cast<float>(depth_mm) / 1000.0f;
                 set_value(x, y, depth);
             }
         }
