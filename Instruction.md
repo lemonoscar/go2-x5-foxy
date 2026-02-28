@@ -141,7 +141,7 @@ ros2 topic hz /arx_x5/joint_state
 
 ## 8. 上机动作顺序
 
-1. 机器人离地/吊装，急停可触发。
+1. 机器人急停可触发。
 2. 按 `0` 起身。
 3. 观察稳定后按 `1` 进入 RL。
 4. 再落地低速测试（先小速度）。
@@ -151,3 +151,92 @@ ros2 topic hz /arx_x5/joint_state
 1. 立即按 `P` 或硬急停。
 2. 保留日志与配置快照。
 3. 优先排查 bridge 状态链路，再排查策略参数。
+
+## 10. 本次联调经验总结（机械臂 + 机器狗）
+
+1. Python/ROS 环境必须纯净。若在 conda 环境里直接跑 ROS2，可能出现 `rclpy._rclpy` 不匹配（如 cp313 vs Foxy cp38）。
+2. ARX bridge 在 NX 上使用 `rmw_fastrtps_cpp` 可能触发异常；`rmw_cyclonedds_cpp` 可稳定启动。
+3. 不能全局强制所有进程都用 Cyclone。`rl_real_go2_x5` 与 Unitree 通道组合下建议维持 `rmw_fastrtps_cpp`。
+4. 双通道 launch 已按进程拆分 RMW（已写入仓库）：
+   - `arx_x5_bridge.py` -> `rmw_cyclonedds_cpp`
+   - `rl_real_go2_x5` -> `rmw_fastrtps_cpp`
+5. `can0` 不是固定指 USB-CAN。NX 上常见 `can0` 是板载 `mttcan`，USB-CAN 可能是 `can1` 或需用 `slcand` 从 `/dev/ttyACM0` 映射。
+6. 若 bridge 日志报 `None of the motors are initialized`，表示 SDK 已加载但机械臂总线无有效响应，优先查接口/波特率/供电/布线。
+7. 稳定流程是先单独跑桥，再拉双进程：
+   - 先确认 `arx_x5_bridge.py` 正常发布 `/arx_x5/joint_state`
+   - 再启动 `go2_x5_real_dual.launch.py`
+
+## 11. 每次调试前准备清单（强制执行）
+
+### 11.1 终端环境
+
+```bash
+conda deactivate
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+unset RMW_IMPLEMENTATION
+export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
+```
+
+### 11.2 机器狗网络检查
+
+```bash
+ip -br a
+# 确认 network_interface (例如 eth0) 存在且 UP
+```
+
+### 11.3 机械臂 CAN 接口检查（USB 连接场景）
+
+1. 查看 USB 设备是否识别（例如 CANable2）：
+
+```bash
+lsusb | grep -i -E "canable|16d0:117e"
+ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null
+```
+
+2. 若无可用 `canX`，通过 `slcand` 映射（示例映射为 `can0`）：
+
+```bash
+sudo modprobe can can_raw can_dev slcan
+sudo pkill slcand || true
+sudo slcand -o -c -f -s8 /dev/ttyACM0 can0   # -s8: 1Mbps
+sudo ip link set can0 up
+ip -details link show can0
+```
+
+3. 若 1Mbps 不通，改 500kbps 再试：
+
+```bash
+sudo ip link set can0 down
+sudo pkill slcand || true
+sudo slcand -o -c -f -s6 /dev/ttyACM0 can0   # -s6: 500kbps
+sudo ip link set can0 up
+```
+
+### 11.4 先单独验证 ARX bridge（推荐）
+
+```bash
+RMW_IMPLEMENTATION=rmw_cyclonedds_cpp ros2 run rl_sar arx_x5_bridge.py --ros-args \
+  -p interface_name:=can0 -p require_initial_state:=false
+```
+
+看到以下关键日志后再进行双通道联调：
+
+- `ARX backend ready: arx5_interface`
+- `ARX bridge started`
+
+### 11.5 双通道标准启动命令
+
+```bash
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+### 11.6 快速故障定位顺序
+
+1. bridge 起不来：先看 `interface_name` 和 CAN 链路。
+2. bridge 能起但 `rl_real_go2_x5` 被 `-9`：查系统日志（OOM/内核杀进程）与独立进程运行差异。
+3. `/arx_x5/joint_state` 无频率：先解决 bridge 和 CAN，再看策略侧。

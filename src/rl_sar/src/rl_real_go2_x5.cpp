@@ -588,13 +588,25 @@ bool RL_Real_Go2X5::ArmCommandDifferent(const std::vector<float>& a, const std::
 
 void RL_Real_Go2X5::GetState(RobotState<float> *state)
 {
-    unitree_go::msg::dds_::LowState_ low_state;
-    unitree_go::msg::dds_::WirelessController_ joystick_snapshot;
+    std::array<float, 4> imu_quat{};
+    std::array<float, 3> imu_gyro{};
+    std::array<float, 20> motor_q{};
+    std::array<float, 20> motor_dq{};
+    std::array<float, 20> motor_tau{};
+    float joy_lx = 0.0f;
+    float joy_ly = 0.0f;
+    float joy_rx = 0.0f;
     xKeySwitchUnion joy_bits;
     {
         std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
-        low_state = this->unitree_low_state;
-        joystick_snapshot = this->joystick;
+        imu_quat = this->unitree_imu_quaternion;
+        imu_gyro = this->unitree_imu_gyroscope;
+        motor_q = this->unitree_motor_q;
+        motor_dq = this->unitree_motor_dq;
+        motor_tau = this->unitree_motor_tau;
+        joy_lx = this->unitree_joy_lx;
+        joy_ly = this->unitree_joy_ly;
+        joy_rx = this->unitree_joy_rx;
         joy_bits = this->unitree_joy;
     }
 
@@ -632,25 +644,34 @@ void RL_Real_Go2X5::GetState(RobotState<float> *state)
     if (joy_bits.components.R1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
     if (joy_bits.components.L1 && joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
-    this->control.x = joystick_snapshot.ly();
-    this->control.y = -joystick_snapshot.lx();
-    this->control.yaw = -joystick_snapshot.rx();
+    this->control.x = joy_ly;
+    this->control.y = -joy_lx;
+    this->control.yaw = -joy_rx;
 
-    state->imu.quaternion[0] = low_state.imu_state().quaternion()[0]; // w
-    state->imu.quaternion[1] = low_state.imu_state().quaternion()[1]; // x
-    state->imu.quaternion[2] = low_state.imu_state().quaternion()[2]; // y
-    state->imu.quaternion[3] = low_state.imu_state().quaternion()[3]; // z
+    state->imu.quaternion[0] = imu_quat[0]; // w
+    state->imu.quaternion[1] = imu_quat[1]; // x
+    state->imu.quaternion[2] = imu_quat[2]; // y
+    state->imu.quaternion[3] = imu_quat[3]; // z
 
     for (int i = 0; i < 3; ++i)
     {
-        state->imu.gyroscope[i] = low_state.imu_state().gyroscope()[i];
+        state->imu.gyroscope[i] = imu_gyro[static_cast<size_t>(i)];
     }
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
         const int mapped = this->params.Get<std::vector<int>>("joint_mapping")[i];
-        state->motor_state.q[i] = low_state.motor_state()[mapped].q();
-        state->motor_state.dq[i] = low_state.motor_state()[mapped].dq();
-        state->motor_state.tau_est[i] = low_state.motor_state()[mapped].tau_est();
+        if (mapped >= 0 && mapped < static_cast<int>(motor_q.size()))
+        {
+            state->motor_state.q[i] = motor_q[static_cast<size_t>(mapped)];
+            state->motor_state.dq[i] = motor_dq[static_cast<size_t>(mapped)];
+            state->motor_state.tau_est[i] = motor_tau[static_cast<size_t>(mapped)];
+        }
+        else
+        {
+            state->motor_state.q[i] = 0.0f;
+            state->motor_state.dq[i] = 0.0f;
+            state->motor_state.tau_est[i] = 0.0f;
+        }
     }
 
     this->ReadArmStateFromExternal(state);
@@ -1062,15 +1083,41 @@ std::string RL_Real_Go2X5::QueryServiceName(std::string form, std::string name)
 
 void RL_Real_Go2X5::LowStateMessageHandler(const void *message)
 {
+    const auto *msg = (const unitree_go::msg::dds_::LowState_ *)message;
+    if (!msg)
+    {
+        return;
+    }
     std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
-    this->unitree_low_state = *(unitree_go::msg::dds_::LowState_ *)message;
+    for (size_t i = 0; i < this->unitree_imu_quaternion.size(); ++i)
+    {
+        this->unitree_imu_quaternion[i] = msg->imu_state().quaternion()[static_cast<int>(i)];
+    }
+    for (size_t i = 0; i < this->unitree_imu_gyroscope.size(); ++i)
+    {
+        this->unitree_imu_gyroscope[i] = msg->imu_state().gyroscope()[static_cast<int>(i)];
+    }
+    for (size_t i = 0; i < this->unitree_motor_q.size(); ++i)
+    {
+        const auto &m = msg->motor_state()[static_cast<int>(i)];
+        this->unitree_motor_q[i] = m.q();
+        this->unitree_motor_dq[i] = m.dq();
+        this->unitree_motor_tau[i] = m.tau_est();
+    }
 }
 
 void RL_Real_Go2X5::JoystickHandler(const void *message)
 {
+    const auto *msg = (const unitree_go::msg::dds_::WirelessController_ *)message;
+    if (!msg)
+    {
+        return;
+    }
     std::lock_guard<std::mutex> lock(this->unitree_state_mutex);
-    joystick = *(unitree_go::msg::dds_::WirelessController_ *)message;
-    this->unitree_joy.value = joystick.keys();
+    this->unitree_joy.value = msg->keys();
+    this->unitree_joy_lx = msg->lx();
+    this->unitree_joy_ly = msg->ly();
+    this->unitree_joy_rx = msg->rx();
 }
 
 #if !defined(USE_CMAKE) && defined(USE_ROS)

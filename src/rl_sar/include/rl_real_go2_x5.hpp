@@ -20,6 +20,7 @@
 #include <unitree/common/thread/thread.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
 #include <csignal>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <mutex>
@@ -114,8 +115,14 @@ private:
     void JoystickHandler(const void *message);
     MotionSwitcherClient msc;
     unitree_go::msg::dds_::LowCmd_ unitree_low_command{};
-    unitree_go::msg::dds_::LowState_ unitree_low_state{};
-    unitree_go::msg::dds_::WirelessController_ joystick{};
+    std::array<float, 4> unitree_imu_quaternion{{1.0f, 0.0f, 0.0f, 0.0f}};
+    std::array<float, 3> unitree_imu_gyroscope{{0.0f, 0.0f, 0.0f}};
+    std::array<float, 20> unitree_motor_q{};
+    std::array<float, 20> unitree_motor_dq{};
+    std::array<float, 20> unitree_motor_tau{};
+    float unitree_joy_lx = 0.0f;
+    float unitree_joy_ly = 0.0f;
+    float unitree_joy_rx = 0.0f;
     ChannelPublisherPtr<unitree_go::msg::dds_::LowCmd_> lowcmd_publisher;
     ChannelSubscriberPtr<unitree_go::msg::dds_::LowState_> lowstate_subscriber;
     ChannelSubscriberPtr<unitree_go::msg::dds_::WirelessController_> joystick_subscriber;
