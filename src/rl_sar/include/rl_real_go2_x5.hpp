@@ -81,6 +81,7 @@ class RL_Real_Go2X5 : public RL
 public:
     RL_Real_Go2X5(int argc, char **argv);
     ~RL_Real_Go2X5();
+    void SafeShutdownNow();
 
 #if defined(USE_ROS2) && defined(USE_ROS)
     std::shared_ptr<rclcpp::Node> ros2_node;
@@ -187,6 +188,7 @@ private:
     bool arm_bridge_state_stream_logged = false;
     float joystick_deadband = 0.05f;
     bool safe_shutdown_done = false;
+    std::mutex safe_shutdown_mutex;
 
     std::mutex cmd_vel_mutex;
     std::mutex arm_command_mutex;

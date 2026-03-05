@@ -111,27 +111,7 @@ RL_Real_Go2X5::RL_Real_Go2X5(int argc, char **argv)
 
 RL_Real_Go2X5::~RL_Real_Go2X5()
 {
-    this->loop_keyboard->shutdown();
-    this->loop_control->shutdown();
-    this->loop_rl->shutdown();
-#ifdef PLOT
-    this->loop_plot->shutdown();
-#endif
-    if (!this->safe_shutdown_done)
-    {
-        try
-        {
-            this->ExecuteSafeShutdownSequence();
-        }
-        catch (const std::exception& e)
-        {
-            std::cout << LOGGER::WARNING << "Safe shutdown sequence failed: " << e.what() << std::endl;
-        }
-        catch (...)
-        {
-            std::cout << LOGGER::WARNING << "Safe shutdown sequence failed with unknown error." << std::endl;
-        }
-    }
+    this->SafeShutdownNow();
     // Restore built-in motion service so wireless controller can take over after process exit.
     if (!this->QueryMotionStatus())
     {
@@ -151,6 +131,35 @@ RL_Real_Go2X5::~RL_Real_Go2X5()
         }
     }
     std::cout << LOGGER::INFO << "RL_Real_Go2X5 exit" << std::endl;
+}
+
+void RL_Real_Go2X5::SafeShutdownNow()
+{
+    std::lock_guard<std::mutex> guard(this->safe_shutdown_mutex);
+    if (this->safe_shutdown_done)
+    {
+        return;
+    }
+
+    if (this->loop_keyboard) this->loop_keyboard->shutdown();
+    if (this->loop_control) this->loop_control->shutdown();
+    if (this->loop_rl) this->loop_rl->shutdown();
+#ifdef PLOT
+    if (this->loop_plot) this->loop_plot->shutdown();
+#endif
+
+    try
+    {
+        this->ExecuteSafeShutdownSequence();
+    }
+    catch (const std::exception& e)
+    {
+        std::cout << LOGGER::WARNING << "Safe shutdown sequence failed: " << e.what() << std::endl;
+    }
+    catch (...)
+    {
+        std::cout << LOGGER::WARNING << "Safe shutdown sequence failed with unknown error." << std::endl;
+    }
 }
 
 std::vector<float> RL_Real_Go2X5::BuildSafeShutdownTargetPose(const std::vector<float>& default_pos) const
@@ -1535,20 +1544,13 @@ void RL_Real_Go2X5::ArmBridgeStateCallback(
 }
 #endif
 
-#if defined(USE_ROS1) && defined(USE_ROS)
-void signalHandlerGo2X5(int signum)
-{
-    std::cout << LOGGER::INFO << "Received signal " << signum << ", shutting down..." << std::endl;
-    ros::shutdown();
-}
-#elif defined(USE_CMAKE) || !defined(USE_ROS)
 volatile sig_atomic_t g_shutdown_requested_go2_x5 = 0;
+
 void signalHandlerGo2X5(int signum)
 {
-    std::cout << LOGGER::INFO << "Received signal " << signum << ", shutting down..." << std::endl;
+    (void)signum;
     g_shutdown_requested_go2_x5 = 1;
 }
-#endif
 
 int main(int argc, char **argv)
 {
@@ -1561,14 +1563,32 @@ int main(int argc, char **argv)
     ChannelFactory::Instance()->Init(0, argv[1]);
 
 #if defined(USE_ROS1) && defined(USE_ROS)
+    ros::init(argc, argv, "rl_sar_go2_x5", ros::init_options::NoSigintHandler);
     signal(SIGINT, signalHandlerGo2X5);
-    ros::init(argc, argv, "rl_sar_go2_x5");
     RL_Real_Go2X5 rl_sar(argc, argv);
-    ros::spin();
+    ros::Rate rate(200.0);
+    while (ros::ok() && !g_shutdown_requested_go2_x5)
+    {
+        ros::spinOnce();
+        rate.sleep();
+    }
+    rl_sar.SafeShutdownNow();
+    if (ros::ok())
+    {
+        ros::shutdown();
+    }
 #elif defined(USE_ROS2) && defined(USE_ROS)
     rclcpp::init(argc, argv);
+    signal(SIGINT, signalHandlerGo2X5);
     auto rl_sar = std::make_shared<RL_Real_Go2X5>(argc, argv);
-    rclcpp::spin(rl_sar->ros2_node);
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(rl_sar->ros2_node);
+    while (rclcpp::ok() && !g_shutdown_requested_go2_x5)
+    {
+        executor.spin_some();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    rl_sar->SafeShutdownNow();
     rclcpp::shutdown();
 #elif defined(USE_CMAKE) || !defined(USE_ROS)
     signal(SIGINT, signalHandlerGo2X5);
