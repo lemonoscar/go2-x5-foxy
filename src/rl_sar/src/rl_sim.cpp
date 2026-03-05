@@ -4,6 +4,7 @@
  */
 
 #include "rl_sim.hpp"
+#include "rl_validation.hpp"
 #include <cmath>
 #include <algorithm>
 #include <cstdint>
@@ -65,6 +66,15 @@ RL_Sim::RL_Sim(int argc, char **argv)
     }
     this->ReadYaml(this->robot_name, "base.yaml");
     this->cmd_vel_alpha = std::clamp(this->params.Get<float>("cmd_vel_alpha", 0.2f), 0.0f, 1.0f);
+    {
+        std::string mapping_error;
+        const int num_dofs = this->params.Get<int>("num_of_dofs");
+        const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping", {});
+        if (!RLValidation::ValidateJointMapping(joint_mapping, num_dofs, num_dofs, &mapping_error))
+        {
+            throw std::runtime_error("Invalid joint_mapping in base.yaml: " + mapping_error);
+        }
+    }
 
     // init optional observation sources (height scan + arm command)
     this->height_scan_width = this->params.Get<int>("height_scan_width", 17);
@@ -362,6 +372,11 @@ void RL_Sim::GetState(RobotState<float> *state)
     }
 #endif
 
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping", {});
+#if defined(USE_ROS1)
+    const auto joint_controller_names = this->params.Get<std::vector<std::string>>("joint_controller_names", {});
+#endif
+
     state->imu.quaternion[0] = orientation.w;
     state->imu.quaternion[1] = orientation.x;
     state->imu.quaternion[2] = orientation.y;
@@ -373,34 +388,91 @@ void RL_Sim::GetState(RobotState<float> *state)
 
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
+        const int mapped = (static_cast<size_t>(i) < joint_mapping.size()) ? joint_mapping[static_cast<size_t>(i)] : -1;
 #if defined(USE_ROS1)
-        state->motor_state.q[i] = this->joint_positions[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
-        state->motor_state.dq[i] = this->joint_velocities[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
-        state->motor_state.tau_est[i] = this->joint_efforts[this->params.Get<std::vector<std::string>>("joint_controller_names")[this->params.Get<std::vector<int>>("joint_mapping")[i]]];
+        const bool mapped_ok = mapped >= 0 && static_cast<size_t>(mapped) < joint_controller_names.size();
+        if (!mapped_ok)
+        {
+            state->motor_state.q[i] = 0.0f;
+            state->motor_state.dq[i] = 0.0f;
+            state->motor_state.tau_est[i] = 0.0f;
+            if (!this->joint_mapping_warned_get_state)
+            {
+                this->joint_mapping_warned_get_state = true;
+                std::cout << LOGGER::WARNING << "Invalid joint_mapping index in GetState: i=" << i
+                          << ", mapped=" << mapped << std::endl;
+            }
+            continue;
+        }
+        const auto& controller_name = joint_controller_names[static_cast<size_t>(mapped)];
+        state->motor_state.q[i] = this->joint_positions[controller_name];
+        state->motor_state.dq[i] = this->joint_velocities[controller_name];
+        state->motor_state.tau_est[i] = this->joint_efforts[controller_name];
 #elif defined(USE_ROS2)
-        state->motor_state.q[i] = robot_state_msg.motor_state[this->params.Get<std::vector<int>>("joint_mapping")[i]].q;
-        state->motor_state.dq[i] = robot_state_msg.motor_state[this->params.Get<std::vector<int>>("joint_mapping")[i]].dq;
-        state->motor_state.tau_est[i] = robot_state_msg.motor_state[this->params.Get<std::vector<int>>("joint_mapping")[i]].tau_est;
+        const bool mapped_ok = mapped >= 0 && static_cast<size_t>(mapped) < robot_state_msg.motor_state.size();
+        if (!mapped_ok)
+        {
+            state->motor_state.q[i] = 0.0f;
+            state->motor_state.dq[i] = 0.0f;
+            state->motor_state.tau_est[i] = 0.0f;
+            if (!this->joint_mapping_warned_get_state)
+            {
+                this->joint_mapping_warned_get_state = true;
+                std::cout << LOGGER::WARNING << "Invalid joint_mapping index in GetState: i=" << i
+                          << ", mapped=" << mapped << std::endl;
+            }
+            continue;
+        }
+        state->motor_state.q[i] = robot_state_msg.motor_state[static_cast<size_t>(mapped)].q;
+        state->motor_state.dq[i] = robot_state_msg.motor_state[static_cast<size_t>(mapped)].dq;
+        state->motor_state.tau_est[i] = robot_state_msg.motor_state[static_cast<size_t>(mapped)].tau_est;
 #endif
     }
 }
 
 void RL_Sim::SetCommand(const RobotCommand<float> *command)
 {
+    const auto joint_mapping = this->params.Get<std::vector<int>>("joint_mapping", {});
+
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
+        const int mapped = (static_cast<size_t>(i) < joint_mapping.size()) ? joint_mapping[static_cast<size_t>(i)] : -1;
 #if defined(USE_ROS1)
-        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].q = command->motor_command.q[i];
-        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].dq = command->motor_command.dq[i];
-        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].kp = command->motor_command.kp[i];
-        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].kd = command->motor_command.kd[i];
-        this->joint_publishers_commands[this->params.Get<std::vector<int>>("joint_mapping")[i]].tau = command->motor_command.tau[i];
+        const bool mapped_ok = mapped >= 0 && static_cast<size_t>(mapped) < this->joint_publishers_commands.size();
+        if (!mapped_ok)
+        {
+            if (!this->joint_mapping_warned_set_command)
+            {
+                this->joint_mapping_warned_set_command = true;
+                std::cout << LOGGER::WARNING << "Invalid joint_mapping index in SetCommand: i=" << i
+                          << ", mapped=" << mapped << std::endl;
+            }
+            continue;
+        }
+        auto& motor_cmd = this->joint_publishers_commands[static_cast<size_t>(mapped)];
+        motor_cmd.q = command->motor_command.q[i];
+        motor_cmd.dq = command->motor_command.dq[i];
+        motor_cmd.kp = command->motor_command.kp[i];
+        motor_cmd.kd = command->motor_command.kd[i];
+        motor_cmd.tau = command->motor_command.tau[i];
 #elif defined(USE_ROS2)
-        this->robot_command_publisher_msg.motor_command[this->params.Get<std::vector<int>>("joint_mapping")[i]].q = command->motor_command.q[i];
-        this->robot_command_publisher_msg.motor_command[this->params.Get<std::vector<int>>("joint_mapping")[i]].dq = command->motor_command.dq[i];
-        this->robot_command_publisher_msg.motor_command[this->params.Get<std::vector<int>>("joint_mapping")[i]].kp = command->motor_command.kp[i];
-        this->robot_command_publisher_msg.motor_command[this->params.Get<std::vector<int>>("joint_mapping")[i]].kd = command->motor_command.kd[i];
-        this->robot_command_publisher_msg.motor_command[this->params.Get<std::vector<int>>("joint_mapping")[i]].tau = command->motor_command.tau[i];
+        const bool mapped_ok = mapped >= 0 && static_cast<size_t>(mapped) < this->robot_command_publisher_msg.motor_command.size();
+        if (!mapped_ok)
+        {
+            if (!this->joint_mapping_warned_set_command)
+            {
+                this->joint_mapping_warned_set_command = true;
+                std::cout << LOGGER::WARNING << "Invalid joint_mapping index in SetCommand: i=" << i
+                          << ", mapped=" << mapped << std::endl;
+            }
+            continue;
+        }
+        auto& motor_cmd = this->robot_command_publisher_msg.motor_command[static_cast<size_t>(mapped)];
+        motor_cmd.q = command->motor_command.q[i];
+        motor_cmd.dq = command->motor_command.dq[i];
+        motor_cmd.kp = command->motor_command.kp[i];
+        motor_cmd.kd = command->motor_command.kd[i];
+        motor_cmd.tau = command->motor_command.tau[i];
 #endif
     }
 
@@ -426,6 +498,7 @@ void RL_Sim::RobotControl()
     {
         const float smooth_time = this->params.Get<float>("arm_command_smoothing_time", 0.2f);
         const float step_dt = this->params.Get<float>("dt") * this->params.Get<int>("decimation");
+        std::lock_guard<std::mutex> lock(this->arm_command_mutex);
         if (step_dt > 0.0f)
         {
             this->arm_command_smoothing_ticks = std::max(0, static_cast<int>(std::lround(smooth_time / step_dt)));
@@ -449,11 +522,7 @@ void RL_Sim::RobotControl()
             pose.resize(static_cast<size_t>(this->arm_command_size));
         }
 
-        {
-            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
-            this->arm_joint_command_latest = pose;
-        }
-
+        this->arm_joint_command_latest = pose;
         this->arm_hold_position = pose;
         this->arm_hold_enabled = true;
         this->arm_sequence_active = false;
@@ -524,15 +593,20 @@ void RL_Sim::RobotControl()
     }
     if (this->control.current_keyboard == Input::Keyboard::Num2)
     {
+        int arm_command_size_local = 0;
+        {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+            arm_command_size_local = this->arm_command_size;
+        }
         if (this->robot_name == "go2_x5")
         {
             std::vector<float> pose = this->params.Get<std::vector<float>>("arm_key_pose");
-            if (pose.size() < static_cast<size_t>(this->arm_command_size))
+            if (pose.size() < static_cast<size_t>(arm_command_size_local))
             {
                 const auto seq = this->params.Get<std::vector<float>>("arm_sequence");
-                if (seq.size() >= static_cast<size_t>(this->arm_command_size))
+                if (seq.size() >= static_cast<size_t>(arm_command_size_local))
                 {
-                    pose.assign(seq.begin(), seq.begin() + static_cast<long>(this->arm_command_size));
+                    pose.assign(seq.begin(), seq.begin() + static_cast<long>(arm_command_size_local));
                 }
             }
             if (!pose.empty())
@@ -549,12 +623,17 @@ void RL_Sim::RobotControl()
     }
     if (this->control.current_keyboard == Input::Keyboard::Num3)
     {
+        int arm_command_size_local = 0;
+        {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+            arm_command_size_local = this->arm_command_size;
+        }
         if (this->robot_name == "go2_x5")
         {
             const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos");
-            if (default_pos.size() >= static_cast<size_t>(this->arm_command_size))
+            if (default_pos.size() >= static_cast<size_t>(arm_command_size_local))
             {
-                const size_t arm_start = default_pos.size() - static_cast<size_t>(this->arm_command_size);
+                const size_t arm_start = default_pos.size() - static_cast<size_t>(arm_command_size_local);
                 std::vector<float> pose(default_pos.begin() + static_cast<long>(arm_start), default_pos.end());
                 apply_arm_hold(pose, "Key[3] pressed: arm restore default");
             }
@@ -572,6 +651,7 @@ void RL_Sim::RobotControl()
     }
     if (this->control.current_keyboard == Input::Keyboard::Num4)
     {
+        std::lock_guard<std::mutex> lock(this->arm_command_mutex);
         this->arm_hold_enabled = !this->arm_hold_enabled;
         std::cout << LOGGER::INFO << "Key[4] pressed: arm hold " << (this->arm_hold_enabled ? "ON" : "OFF") << std::endl;
         this->control.current_keyboard = this->control.last_keyboard;
@@ -706,6 +786,7 @@ void RL_Sim::ArmJointCommandCallback(const std_msgs::msg::Float32MultiArray::Sha
 void RL_Sim::StartArmSequence(bool loop)
 {
     // Refresh sequence settings from config (loaded during InitRL).
+    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
     this->arm_command_size = this->params.Get<int>("arm_command_size", this->arm_command_size);
     this->arm_sequence_steps = this->params.Get<int>("arm_sequence_steps", 0);
     this->arm_sequence_flat = this->params.Get<std::vector<float>>("arm_sequence", {});
@@ -750,6 +831,7 @@ void RL_Sim::StartArmSequence(bool loop)
 
 void RL_Sim::StopArmSequence()
 {
+    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
     this->arm_sequence_active = false;
     this->arm_sequence_loop = false;
     if (this->arm_command_smoothed.size() == static_cast<size_t>(this->arm_command_size))
@@ -947,13 +1029,11 @@ void RL_Sim::RunModel()
         }
         if (this->params.Has("arm_command_size"))
         {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
             const int new_size = this->params.Get<int>("arm_command_size", static_cast<int>(this->arm_joint_command_latest.size()));
             if (new_size > 0 && static_cast<size_t>(new_size) != this->arm_joint_command_latest.size())
             {
-                {
-                    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
-                    this->arm_joint_command_latest.assign(static_cast<size_t>(new_size), 0.0f);
-                }
+                this->arm_joint_command_latest.assign(static_cast<size_t>(new_size), 0.0f);
                 this->arm_command_size = new_size;
                 this->arm_sequence_current.assign(static_cast<size_t>(new_size), 0.0f);
                 this->arm_command_smoothing_start.assign(static_cast<size_t>(new_size), 0.0f);
@@ -1004,6 +1084,7 @@ void RL_Sim::RunModel()
         }
         if (this->params.Has("arm_command_size"))
         {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
             const bool seq_active_before = this->arm_sequence_active;
             this->UpdateArmSequence();
             std::vector<float> desired_arm_command;
@@ -1011,13 +1092,9 @@ void RL_Sim::RunModel()
             {
                 desired_arm_command = this->arm_sequence_current;
             }
-            else
+            else if (!this->arm_joint_command_latest.empty())
             {
-                std::lock_guard<std::mutex> lock(this->arm_command_mutex);
-                if (!this->arm_joint_command_latest.empty())
-                {
-                    desired_arm_command = this->arm_joint_command_latest;
-                }
+                desired_arm_command = this->arm_joint_command_latest;
             }
 
             if (!desired_arm_command.empty())
@@ -1083,20 +1160,32 @@ void RL_Sim::RunModel()
         this->obs.actions = this->Forward();
         this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
 
+        bool arm_hold_enabled_local = false;
+        bool arm_sequence_active_local = false;
+        int arm_command_size_local = 0;
+        std::vector<float> arm_hold_position_local;
+        {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+            arm_hold_enabled_local = this->arm_hold_enabled;
+            arm_sequence_active_local = this->arm_sequence_active;
+            arm_command_size_local = this->arm_command_size;
+            arm_hold_position_local = this->arm_hold_position;
+        }
+
         if (!this->output_dof_pos.empty())
         {
-            if (this->arm_hold_enabled && !this->arm_sequence_active)
+            if (arm_hold_enabled_local && !arm_sequence_active_local)
             {
                 const int num_dofs = this->params.Get<int>("num_of_dofs");
-                if (this->arm_command_size > 0 && num_dofs >= this->arm_command_size)
+                if (arm_command_size_local > 0 && num_dofs >= arm_command_size_local)
                 {
-                    const int arm_start = num_dofs - this->arm_command_size;
-                    for (int i = 0; i < this->arm_command_size; ++i)
+                    const int arm_start = num_dofs - arm_command_size_local;
+                    for (int i = 0; i < arm_command_size_local; ++i)
                     {
                         const size_t idx = static_cast<size_t>(arm_start + i);
-                        if (idx < this->output_dof_pos.size() && i < static_cast<int>(this->arm_hold_position.size()))
+                        if (idx < this->output_dof_pos.size() && i < static_cast<int>(arm_hold_position_local.size()))
                         {
-                            this->output_dof_pos[idx] = this->arm_hold_position[static_cast<size_t>(i)];
+                            this->output_dof_pos[idx] = arm_hold_position_local[static_cast<size_t>(i)];
                         }
                     }
                 }
@@ -1104,13 +1193,13 @@ void RL_Sim::RunModel()
         }
         if (!this->output_dof_vel.empty())
         {
-            if (this->arm_hold_enabled && !this->arm_sequence_active)
+            if (arm_hold_enabled_local && !arm_sequence_active_local)
             {
                 const int num_dofs = this->params.Get<int>("num_of_dofs");
-                if (this->arm_command_size > 0 && num_dofs >= this->arm_command_size)
+                if (arm_command_size_local > 0 && num_dofs >= arm_command_size_local)
                 {
-                    const int arm_start = num_dofs - this->arm_command_size;
-                    for (int i = 0; i < this->arm_command_size; ++i)
+                    const int arm_start = num_dofs - arm_command_size_local;
+                    for (int i = 0; i < arm_command_size_local; ++i)
                     {
                         const size_t idx = static_cast<size_t>(arm_start + i);
                         if (idx < this->output_dof_vel.size())

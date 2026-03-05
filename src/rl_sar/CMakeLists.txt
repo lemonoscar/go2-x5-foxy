@@ -778,6 +778,18 @@ endif()
 # ========================
 # only for test
 # ========================
+# Unit tests are enabled in standalone CMake mode to keep Jetson deploy path lean.
+if(USE_CMAKE AND BUILD_TESTING)
+    enable_testing()
+
+    add_executable(test_loop_timing_precision test/test_loop_timing_precision.cpp)
+    target_link_libraries(test_loop_timing_precision Threads::Threads)
+    add_test(NAME test_loop_timing_precision COMMAND test_loop_timing_precision)
+
+    add_executable(test_joint_mapping_validation test/test_joint_mapping_validation.cpp)
+    add_test(NAME test_joint_mapping_validation COMMAND test_joint_mapping_validation)
+endif()
+
 # add_executable(test_observation_buffer test/test_observation_buffer.cpp)
 # target_link_libraries(test_observation_buffer
 #     observation_buffer

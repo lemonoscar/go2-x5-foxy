@@ -63,6 +63,28 @@ public:
         std::cout << LOGGER::INFO << "[Loop] Loop end - name: " << _name << std::endl;
     }
 
+    static std::chrono::microseconds ComputeSleepDuration(float period_sec, std::chrono::steady_clock::duration elapsed)
+    {
+        if (period_sec <= 0.0f)
+        {
+            return std::chrono::microseconds(0);
+        }
+
+        auto period = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::duration<float>(period_sec));
+        if (period.count() <= 0)
+        {
+            period = std::chrono::microseconds(1);
+        }
+
+        auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed);
+        if (elapsed_us >= period)
+        {
+            return std::chrono::microseconds(0);
+        }
+
+        return period - elapsed_us;
+    }
+
 private:
     std::string _name;
     float _period;
@@ -82,8 +104,7 @@ private:
             _func();
 
             auto end = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-            auto sleepTime = std::chrono::milliseconds(static_cast<int>((_period * 1000) - elapsed.count()));
+            auto sleepTime = ComputeSleepDuration(_period, end - start);
             if (sleepTime.count() > 0)
             {
                 std::unique_lock<std::mutex> lock(_mutex);

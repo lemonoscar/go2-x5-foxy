@@ -138,6 +138,7 @@ RL_Real_Go2X5::~RL_Real_Go2X5()
 
 void RL_Real_Go2X5::InitializeArmCommandState()
 {
+    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
     this->cmd_vel_alpha = this->params.Get<float>("cmd_vel_alpha", this->cmd_vel_alpha);
     this->joystick_deadband = std::max(0.0f, this->params.Get<float>("joystick_deadband", this->joystick_deadband));
     this->arm_command_size = this->params.Get<int>("arm_command_size", 0);
@@ -728,16 +729,21 @@ void RL_Real_Go2X5::RobotControl()
 
     if (this->control.current_keyboard == Input::Keyboard::Num2)
     {
+        int arm_command_size_local = 0;
+        {
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+            arm_command_size_local = this->arm_command_size;
+        }
         std::vector<float> pose = this->params.Get<std::vector<float>>("arm_key_pose", {});
-        if (pose.size() < static_cast<size_t>(this->arm_command_size))
+        if (pose.size() < static_cast<size_t>(arm_command_size_local))
         {
             pose = this->params.Get<std::vector<float>>("arm_hold_pose", {});
         }
-        if (!pose.empty() && this->arm_command_size > 0)
+        if (!pose.empty() && arm_command_size_local > 0)
         {
-            if (pose.size() >= static_cast<size_t>(this->arm_command_size))
+            if (pose.size() >= static_cast<size_t>(arm_command_size_local))
             {
-                pose.resize(static_cast<size_t>(this->arm_command_size));
+                pose.resize(static_cast<size_t>(arm_command_size_local));
                 this->ApplyArmHold(pose, "Key[2] pressed: arm hold pose");
             }
         }
@@ -746,10 +752,15 @@ void RL_Real_Go2X5::RobotControl()
 
     if (this->control.current_keyboard == Input::Keyboard::Num3)
     {
-        const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos", {});
-        if (this->arm_command_size > 0 && default_pos.size() >= static_cast<size_t>(this->arm_command_size))
+        int arm_command_size_local = 0;
         {
-            const size_t arm_start = default_pos.size() - static_cast<size_t>(this->arm_command_size);
+            std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+            arm_command_size_local = this->arm_command_size;
+        }
+        const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos", {});
+        if (arm_command_size_local > 0 && default_pos.size() >= static_cast<size_t>(arm_command_size_local))
+        {
+            const size_t arm_start = default_pos.size() - static_cast<size_t>(arm_command_size_local);
             std::vector<float> pose(
                 default_pos.begin() + static_cast<long>(arm_start),
                 default_pos.end()
@@ -814,63 +825,73 @@ void RL_Real_Go2X5::RunModel()
     this->obs.dof_pos = this->robot_state.motor_state.q;
     this->obs.dof_vel = this->robot_state.motor_state.dq;
 
+    int arm_command_size_local = 0;
+    {
+        std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+        arm_command_size_local = this->arm_command_size;
+    }
+
     std::vector<float> arm_hold_local;
     bool arm_hold_enabled_local = false;
-    if (this->arm_command_size > 0)
+    if (arm_command_size_local > 0)
     {
+        std::vector<float> arm_obs_local;
         std::vector<float> desired_arm_command;
         {
             std::lock_guard<std::mutex> lock(this->arm_command_mutex);
             desired_arm_command = this->arm_joint_command_latest;
             arm_hold_local = this->arm_hold_position;
             arm_hold_enabled_local = this->arm_hold_enabled;
-        }
-
-        if (desired_arm_command.size() != static_cast<size_t>(this->arm_command_size))
-        {
-            desired_arm_command = arm_hold_local;
-        }
-
-        if (!desired_arm_command.empty())
-        {
-            if (!this->arm_command_initialized || this->arm_command_smoothed.size() != desired_arm_command.size())
+            if (desired_arm_command.size() != static_cast<size_t>(arm_command_size_local))
             {
-                this->arm_command_smoothed = desired_arm_command;
-                this->arm_command_smoothing_start = desired_arm_command;
-                this->arm_command_smoothing_target = desired_arm_command;
-                this->arm_command_smoothing_counter = this->arm_command_smoothing_ticks;
-                this->arm_command_initialized = true;
+                desired_arm_command = arm_hold_local;
             }
 
-            if (this->ArmCommandDifferent(desired_arm_command, this->arm_command_smoothing_target))
+            if (!desired_arm_command.empty())
             {
-                this->arm_command_smoothing_start = this->arm_command_smoothed;
-                this->arm_command_smoothing_target = desired_arm_command;
-                this->arm_command_smoothing_counter = 0;
-            }
-
-            if (this->arm_command_smoothing_ticks <= 1)
-            {
-                this->arm_command_smoothed = this->arm_command_smoothing_target;
-            }
-            else
-            {
-                const int ticks = this->arm_command_smoothing_ticks;
-                int c = std::min(this->arm_command_smoothing_counter + 1, ticks);
-                const float alpha = static_cast<float>(c) / static_cast<float>(ticks);
-                for (int i = 0; i < this->arm_command_size; ++i)
+                if (!this->arm_command_initialized || this->arm_command_smoothed.size() != desired_arm_command.size())
                 {
-                    const float start = this->arm_command_smoothing_start[static_cast<size_t>(i)];
-                    const float target = this->arm_command_smoothing_target[static_cast<size_t>(i)];
-                    this->arm_command_smoothed[static_cast<size_t>(i)] = (1.0f - alpha) * start + alpha * target;
+                    this->arm_command_smoothed = desired_arm_command;
+                    this->arm_command_smoothing_start = desired_arm_command;
+                    this->arm_command_smoothing_target = desired_arm_command;
+                    this->arm_command_smoothing_counter = this->arm_command_smoothing_ticks;
+                    this->arm_command_initialized = true;
                 }
-                if (this->arm_command_smoothing_counter < ticks)
-                {
-                    this->arm_command_smoothing_counter += 1;
-                }
-            }
 
-            this->obs.arm_joint_command = this->arm_command_smoothed;
+                if (this->ArmCommandDifferent(desired_arm_command, this->arm_command_smoothing_target))
+                {
+                    this->arm_command_smoothing_start = this->arm_command_smoothed;
+                    this->arm_command_smoothing_target = desired_arm_command;
+                    this->arm_command_smoothing_counter = 0;
+                }
+
+                if (this->arm_command_smoothing_ticks <= 1)
+                {
+                    this->arm_command_smoothed = this->arm_command_smoothing_target;
+                }
+                else
+                {
+                    const int ticks = this->arm_command_smoothing_ticks;
+                    int c = std::min(this->arm_command_smoothing_counter + 1, ticks);
+                    const float alpha = static_cast<float>(c) / static_cast<float>(ticks);
+                    for (int i = 0; i < arm_command_size_local; ++i)
+                    {
+                        const float start = this->arm_command_smoothing_start[static_cast<size_t>(i)];
+                        const float target = this->arm_command_smoothing_target[static_cast<size_t>(i)];
+                        this->arm_command_smoothed[static_cast<size_t>(i)] = (1.0f - alpha) * start + alpha * target;
+                    }
+                    if (this->arm_command_smoothing_counter < ticks)
+                    {
+                        this->arm_command_smoothing_counter += 1;
+                    }
+                }
+
+                arm_obs_local = this->arm_command_smoothed;
+            }
+        }
+        if (!arm_obs_local.empty())
+        {
+            this->obs.arm_joint_command = arm_obs_local;
         }
     }
 
@@ -880,10 +901,10 @@ void RL_Real_Go2X5::RunModel()
     if (!this->output_dof_pos.empty() && arm_hold_enabled_local && !arm_hold_local.empty())
     {
         const int num_dofs = this->params.Get<int>("num_of_dofs");
-        if (this->arm_command_size > 0 && num_dofs >= this->arm_command_size)
+        if (arm_command_size_local > 0 && num_dofs >= arm_command_size_local)
         {
-            const int arm_start = num_dofs - this->arm_command_size;
-            for (int i = 0; i < this->arm_command_size; ++i)
+            const int arm_start = num_dofs - arm_command_size_local;
+            for (int i = 0; i < arm_command_size_local; ++i)
             {
                 const size_t idx = static_cast<size_t>(arm_start + i);
                 if (idx < this->output_dof_pos.size() && i < static_cast<int>(arm_hold_local.size()))
@@ -905,11 +926,11 @@ void RL_Real_Go2X5::RunModel()
             std::lock_guard<std::mutex> lock(this->arm_external_state_mutex);
             bridge_state_fresh = this->IsArmBridgeStateFreshLocked();
         }
-        if (!bridge_state_fresh && !arm_hold_local.empty() && this->arm_command_size > 0)
+        if (!bridge_state_fresh && !arm_hold_local.empty() && arm_command_size_local > 0)
         {
             const int num_dofs = this->params.Get<int>("num_of_dofs");
-            const int arm_start = std::max(0, num_dofs - this->arm_command_size);
-            for (int i = 0; i < this->arm_command_size; ++i)
+            const int arm_start = std::max(0, num_dofs - arm_command_size_local);
+            for (int i = 0; i < arm_command_size_local; ++i)
             {
                 const size_t idx = static_cast<size_t>(arm_start + i);
                 if (idx < this->output_dof_pos.size() && i < static_cast<int>(arm_hold_local.size()))
@@ -1175,12 +1196,16 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
 #endif
 )
 {
-    if (!msg || this->arm_command_size <= 0)
+    if (!msg)
     {
         return;
     }
 
     std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+    if (this->arm_command_size <= 0)
+    {
+        return;
+    }
     if (this->arm_joint_command_latest.size() != static_cast<size_t>(this->arm_command_size))
     {
         this->arm_joint_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);

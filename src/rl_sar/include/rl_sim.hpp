@@ -185,6 +185,10 @@ private:
     // output smoothing
     std::vector<float> output_dof_pos_filtered;
     bool output_dof_pos_initialized = false;
+
+    // one-shot warnings to avoid log flooding under invalid configs
+    bool joint_mapping_warned_get_state = false;
+    bool joint_mapping_warned_set_command = false;
 };
 
 #endif // RL_SIM_HPP
