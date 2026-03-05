@@ -119,6 +119,72 @@ Target flow for deployment:
 3. Publish arm target to `/arm_joint_pos_cmd`, then press `2` -> arm moves/holds at that published target.
 4. Press `3` -> arm returns to default pose.
 
+## Minimal Reproducible Sim2Real (Jetson, Go2-X5)
+
+Assumptions:
+
+- Jetson is connected to Go2 via `eth0`.
+- X5 arm CAN interface is `can0`.
+- `ARX5_SDK_ROOT` is available (example: `/home/unitree/arx5-sdk`).
+- Repository has been built by `./build.sh`.
+
+Terminal 1 (start real deployment, leg + arm bridge):
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+Terminal 2 (publish locomotion command):
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.20, y: 0.00, z: 0.00}, angular: {x: 0.00, y: 0.00, z: 0.00}}" -r 20
+```
+
+Terminal 3 (publish arm target):
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 topic pub /arm_joint_pos_cmd std_msgs/msg/Float32MultiArray \
+  "{data: [0.8, 2.4, 1.6, 0.0, 0.3, 0.3]}" -r 10
+```
+
+Keyboard actions on Terminal 1 (strict order):
+
+1. Press `0` (get up).
+2. Press `1` (enter RL, default uses `/cmd_vel`).
+3. Press `2` (arm takes latest `/arm_joint_pos_cmd` target).
+4. Press `3` (arm restore default pose).
+
+Safe takeover (Ctrl+C):
+
+- Press `Ctrl+C` in Terminal 1 to stop deployment.
+- Runtime performs a graceful exit sequence before handing control back:
+  - smooth leg soft-landing to lying pose
+  - arm retract to `arm_shutdown_pose` (fallback: `arm_hold_pose`)
+  - restore built-in motion service (`normal/sport_mode`)
+- Tunable params (`policy/go2_x5/robot_lab/config.yaml`):
+  - `shutdown_soft_land_sec`
+  - `shutdown_hold_sec`
+  - `arm_shutdown_pose`
+
+Quick checks:
+
+```bash
+ros2 topic hz /arx_x5/joint_state
+ros2 topic echo --once /arx_x5/joint_cmd
+```
+
 ## Jetson Notes
 
 - This branch prioritizes control-loop timing precision and thread safety for high-frequency loops.
@@ -140,6 +206,7 @@ Current tests:
 
 - `test_loop_timing_precision`
 - `test_joint_mapping_validation`
+- `test_go2_x5_control_logic`
 
 ## Repository Layout
 

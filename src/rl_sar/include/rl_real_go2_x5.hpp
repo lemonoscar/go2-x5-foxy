@@ -140,6 +140,11 @@ private:
     void WriteArmCommandToExternal(const RobotCommand<float> *command);
     void ApplyArmHold(const std::vector<float>& target, const char* reason);
     bool ArmCommandDifferent(const std::vector<float>& a, const std::vector<float>& b) const;
+    void ExecuteSafeShutdownSequence();
+    std::vector<float> BuildSafeShutdownTargetPose(const std::vector<float>& default_pos) const;
+    void PublishWholeBodyPose(const std::vector<float>& pose,
+                              const std::vector<float>& kp,
+                              const std::vector<float>& kd);
 
     // others
     std::vector<float> mapped_joint_positions;
@@ -181,6 +186,7 @@ private:
     std::chrono::steady_clock::time_point arm_bridge_state_stamp;
     bool arm_bridge_state_stream_logged = false;
     float joystick_deadband = 0.05f;
+    bool safe_shutdown_done = false;
 
     std::mutex cmd_vel_mutex;
     std::mutex arm_command_mutex;

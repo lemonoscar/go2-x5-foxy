@@ -119,6 +119,72 @@ Go2-X5 机械臂快捷键：
 3. 向 `/arm_joint_pos_cmd` 发布机械臂目标后按 `2`，机械臂到达并保持该目标。
 4. 按 `3`，机械臂恢复默认位姿。
 
+## 最小可复现 Sim2Real 流程（Jetson + Go2-X5）
+
+前置假设：
+
+- Jetson 与 Go2 通过 `eth0` 连接。
+- X5 机械臂 CAN 口为 `can0`。
+- 已配置 `ARX5_SDK_ROOT`（例如 `/home/unitree/arx5-sdk`）。
+- 仓库已通过 `./build.sh` 完成编译。
+
+终端 1（启动真机双进程：腿 + 机械臂桥）：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+终端 2（发布机身指令）：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+  "{linear: {x: 0.20, y: 0.00, z: 0.00}, angular: {x: 0.00, y: 0.00, z: 0.00}}" -r 20
+```
+
+终端 3（发布机械臂目标）：
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 topic pub /arm_joint_pos_cmd std_msgs/msg/Float32MultiArray \
+  "{data: [0.8, 2.4, 1.6, 0.0, 0.3, 0.3]}" -r 10
+```
+
+在终端 1 按键（严格按顺序）：
+
+1. 按 `0`（起身）。
+2. 按 `1`（进入 RL，默认采用 `/cmd_vel`）。
+3. 按 `2`（机械臂执行最近一次 `/arm_joint_pos_cmd` 目标）。
+4. 按 `3`（机械臂恢复默认位姿）。
+
+安全接管（Ctrl+C）：
+
+- 在终端 1 按 `Ctrl+C` 停止部署进程。
+- 退出前会执行平滑接管流程，再交还机身控制：
+  - 腿部平滑软着陆到下趴姿态
+  - 机械臂回收到 `arm_shutdown_pose`（若未配置则回退 `arm_hold_pose`）
+  - 恢复机身内置运动服务（`normal/sport_mode`）
+- 可调参数（`policy/go2_x5/robot_lab/config.yaml`）：
+  - `shutdown_soft_land_sec`
+  - `shutdown_hold_sec`
+  - `arm_shutdown_pose`
+
+快速检查：
+
+```bash
+ros2 topic hz /arx_x5/joint_state
+ros2 topic echo --once /arx_x5/joint_cmd
+```
+
 ## Jetson 注意事项
 
 - 本分支优先优化了高频控制循环计时精度与并发安全。
@@ -142,6 +208,7 @@ ctest --test-dir cmake_build --output-on-failure
 
 - `test_loop_timing_precision`
 - `test_joint_mapping_validation`
+- `test_go2_x5_control_logic`
 
 ## 目录说明
 

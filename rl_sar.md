@@ -98,6 +98,26 @@
 - 结果：
   - 真机按键流程与 sim2sim 风格对齐，更接近“0 起身 / 1 RL指令驱动 / 2 机械臂到发布位姿 / 3 机械臂复原”的部署诉求。
 
+#### 8) Ctrl+C 安全接管（软着陆 + 机械臂回收）
+- 文件：
+  - `src/rl_sar/src/rl_real_go2_x5.cpp`
+  - `src/rl_sar/include/rl_real_go2_x5.hpp`
+  - `policy/go2_x5/robot_lab/config.yaml`
+  - `README.md`
+  - `README_CN.md`
+- 改动：
+  - `RL_Real_Go2X5` 析构时新增 `ExecuteSafeShutdownSequence()`：
+    - 先平滑插值到下趴姿态（默认腿部使用 go2_x5 lying pose）。
+    - 机械臂回收到 `arm_shutdown_pose`（回退 `arm_hold_pose`）。
+    - 保持短时间后再恢复机身内置运动服务。
+  - 新增参数：
+    - `shutdown_soft_land_sec`
+    - `shutdown_hold_sec`
+    - `arm_shutdown_pose`
+  - ROS1 信号处理移除 `exit(0)`，仅 `ros::shutdown()`，确保析构链执行安全退出序列。
+- 结果：
+  - 在 `Ctrl+C` 退出时，具备可接管的平滑退场流程，降低大体型机器人突停风险。
+
 ### 文档同步
 - 更新：
   - `README.md`

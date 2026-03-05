@@ -125,3 +125,7 @@ go2_x5/robot_lab:
                  0.60, 3.00, 1.00, 0.20, 0.00, 0.00, #侧前夹
                  0.20, 1.00, 1.40, -0.20, 0.00, 0.00, #上抬
                  -1.7, 1.4, 2.3, 0.0, 0.43, 0.43]
+  # Ctrl+C safe takeover sequence
+  shutdown_soft_land_sec: 2.0
+  shutdown_hold_sec: 0.6
+  arm_shutdown_pose: [0, 1.57, 1.57, 0.0, 0.0, 0.0]
