@@ -96,17 +96,28 @@ ros2 launch rl_sar go2_x5_real_dual.launch.py \
 
 - `0`：起身
 - `1`：进入 RL 行走
+  - `go2_x5/robot_lab/config.yaml` 默认：开启导航模式，采用 `/cmd_vel`
+  - 若设 `key1_prefer_navigation_mode: false`，则改为使用 `fixed_cmd_*`
 - `9`：趴下
 - `P`：被动模式
 - `W/A/S/D/Q/E`：速度指令
 - `Space`：速度清零
-- `N`：切换 `/cmd_vel` 导航模式
+- `N`：切换 `/cmd_vel` 导航模式（手动覆盖）
 
 Go2-X5 机械臂快捷键：
 
-- `2`：机械臂保持姿态
+- `2`：机械臂保持在最近一次 `/arm_joint_pos_cmd` 发布位姿（若无则回退 `arm_key_pose`，再回退 `arm_hold_pose`）
 - `3`：机械臂恢复默认姿态
 - `4`：机械臂保持 ON/OFF
+
+## Go2-X5 Sim2Real 按键流程
+
+推荐部署流程：
+
+1. 按 `0`，机器人起身。
+2. 按 `1`，进入 RL 状态，默认从 `/cmd_vel` 取指令。
+3. 向 `/arm_joint_pos_cmd` 发布机械臂目标后按 `2`，机械臂到达并保持该目标。
+4. 按 `3`，机械臂恢复默认位姿。
 
 ## Jetson 注意事项
 

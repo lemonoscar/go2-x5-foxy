@@ -96,17 +96,28 @@ ros2 launch rl_sar go2_x5_real_dual.launch.py \
 
 - `0`: Get up
 - `1`: Enter RL locomotion
+  - default in `go2_x5/robot_lab/config.yaml`: enables navigation mode and consumes `/cmd_vel`
+  - set `key1_prefer_navigation_mode: false` to use `fixed_cmd_*` instead
 - `9`: Get down
 - `P`: Passive mode
 - `W/A/S/D/Q/E`: velocity commands
 - `Space`: clear velocity
-- `N`: toggle `/cmd_vel` navigation mode
+- `N`: toggle `/cmd_vel` navigation mode (manual override)
 
 Go2-X5 arm shortcuts:
 
-- `2`: arm hold pose
+- `2`: hold arm at latest `/arm_joint_pos_cmd` (fallback to `arm_key_pose` then `arm_hold_pose`)
 - `3`: restore default arm pose
 - `4`: arm hold ON/OFF
+
+## Go2-X5 Sim2Real Key Flow
+
+Target flow for deployment:
+
+1. Press `0` -> robot gets up.
+2. Press `1` -> enter RL state; by default commands are from `/cmd_vel`.
+3. Publish arm target to `/arm_joint_pos_cmd`, then press `2` -> arm moves/holds at that published target.
+4. Press `3` -> arm returns to default pose.
 
 ## Jetson Notes
 

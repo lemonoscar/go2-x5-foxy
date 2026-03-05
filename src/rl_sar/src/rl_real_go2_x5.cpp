@@ -4,6 +4,7 @@
  */
 
 #include "rl_real_go2_x5.hpp"
+#include "go2_x5_control_logic.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -160,6 +161,8 @@ void RL_Real_Go2X5::InitializeArmCommandState()
     if (this->arm_command_size <= 0)
     {
         this->arm_joint_command_latest.clear();
+        this->arm_topic_command_latest.clear();
+        this->arm_topic_command_received = false;
         this->arm_hold_position.clear();
         this->arm_command_smoothing_start.clear();
         this->arm_command_smoothing_target.clear();
@@ -188,6 +191,8 @@ void RL_Real_Go2X5::InitializeArmCommandState()
     }
 
     this->arm_joint_command_latest = this->arm_hold_position;
+    this->arm_topic_command_latest = this->arm_hold_position;
+    this->arm_topic_command_received = false;
     this->arm_command_smoothing_start = this->arm_hold_position;
     this->arm_command_smoothing_target = this->arm_hold_position;
     this->arm_command_smoothed = this->arm_hold_position;
@@ -730,22 +735,51 @@ void RL_Real_Go2X5::RobotControl()
     if (this->control.current_keyboard == Input::Keyboard::Num2)
     {
         int arm_command_size_local = 0;
+        std::vector<float> topic_pose;
+        bool topic_received = false;
         {
             std::lock_guard<std::mutex> lock(this->arm_command_mutex);
             arm_command_size_local = this->arm_command_size;
+            topic_pose = this->arm_topic_command_latest;
+            topic_received = this->arm_topic_command_received;
         }
-        std::vector<float> pose = this->params.Get<std::vector<float>>("arm_key_pose", {});
-        if (pose.size() < static_cast<size_t>(arm_command_size_local))
+
+        const bool key2_prefer_topic_command =
+            this->params.Get<bool>("key2_prefer_topic_command", true);
+        const auto key_pose = this->params.Get<std::vector<float>>("arm_key_pose", {});
+        const auto hold_pose = this->params.Get<std::vector<float>>("arm_hold_pose", {});
+        const auto selected = Go2X5ControlLogic::SelectKey2ArmPose(
+            arm_command_size_local,
+            key2_prefer_topic_command,
+            topic_received,
+            topic_pose,
+            key_pose,
+            hold_pose);
+
+        if (!selected.pose.empty())
         {
-            pose = this->params.Get<std::vector<float>>("arm_hold_pose", {});
-        }
-        if (!pose.empty() && arm_command_size_local > 0)
-        {
-            if (pose.size() >= static_cast<size_t>(arm_command_size_local))
+            const char* reason = "Key[2] pressed: arm hold pose";
+            switch (selected.source)
             {
-                pose.resize(static_cast<size_t>(arm_command_size_local));
-                this->ApplyArmHold(pose, "Key[2] pressed: arm hold pose");
+                case Go2X5ControlLogic::ArmPoseSource::TopicCommand:
+                    reason = "Key[2] pressed: arm topic command hold";
+                    break;
+                case Go2X5ControlLogic::ArmPoseSource::KeyPose:
+                    reason = "Key[2] pressed: arm key pose hold";
+                    break;
+                case Go2X5ControlLogic::ArmPoseSource::HoldPose:
+                    reason = "Key[2] pressed: arm hold pose";
+                    break;
+                case Go2X5ControlLogic::ArmPoseSource::None:
+                    break;
             }
+            this->ApplyArmHold(selected.pose, reason);
+        }
+        else if (arm_command_size_local > 0)
+        {
+            std::cout << LOGGER::WARNING
+                      << "Key[2] pressed: no valid arm target (topic/key/hold) for arm_command_size="
+                      << arm_command_size_local << std::endl;
         }
         this->control.current_keyboard = this->control.last_keyboard;
     }
@@ -1210,12 +1244,18 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
     {
         this->arm_joint_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
     }
+    if (this->arm_topic_command_latest.size() != static_cast<size_t>(this->arm_command_size))
+    {
+        this->arm_topic_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
+    }
 
     const size_t count = std::min(static_cast<size_t>(this->arm_command_size), msg->data.size());
     for (size_t i = 0; i < count; ++i)
     {
         this->arm_joint_command_latest[i] = msg->data[i];
+        this->arm_topic_command_latest[i] = msg->data[i];
     }
+    this->arm_topic_command_received = (count > 0);
 }
 
 void RL_Real_Go2X5::ArmBridgeStateCallback(

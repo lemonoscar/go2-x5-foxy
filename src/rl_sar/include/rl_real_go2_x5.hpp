@@ -154,6 +154,8 @@ private:
     std::string arm_joint_command_topic = "/arm_joint_pos_cmd";
     std::string arm_joint_command_topic_active;
     std::vector<float> arm_joint_command_latest;
+    std::vector<float> arm_topic_command_latest;
+    bool arm_topic_command_received = false;
     std::vector<float> arm_hold_position;
     std::vector<float> arm_command_smoothing_start;
     std::vector<float> arm_command_smoothing_target;

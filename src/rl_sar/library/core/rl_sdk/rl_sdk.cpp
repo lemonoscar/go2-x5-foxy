@@ -4,6 +4,7 @@
  */
 
 #include "rl_sdk.hpp"
+#include "go2_x5_control_logic.hpp"
 
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
@@ -30,13 +31,28 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
                             this->fsm.current_state_->GetStateName().find("RLLocomotion") != std::string::npos);
         if (in_rl && this->control.last_keyboard != Input::Keyboard::Num1)
         {
-            this->control.x = this->params.Get<float>("fixed_cmd_x", 0.6f);
-            this->control.y = this->params.Get<float>("fixed_cmd_y", 0.0f);
-            this->control.yaw = this->params.Get<float>("fixed_cmd_yaw", 0.0f);
-            this->control.navigation_mode = false;
-
-            std::cout << std::endl << LOGGER::INFO << "Key[1] pressed: fixed cmd x=" << this->control.x
-                      << " y=" << this->control.y << " yaw=" << this->control.yaw << std::endl;
+            const bool key1_prefer_navigation_mode =
+                this->params.Get<bool>("key1_prefer_navigation_mode", false);
+            const auto key1_mode =
+                Go2X5ControlLogic::ResolveKey1Mode(key1_prefer_navigation_mode);
+            if (key1_mode == Go2X5ControlLogic::Key1Mode::Navigation)
+            {
+                this->control.navigation_mode = true;
+                this->control.x = 0.0f;
+                this->control.y = 0.0f;
+                this->control.yaw = 0.0f;
+                std::cout << std::endl << LOGGER::INFO
+                          << "Key[1] pressed: navigation mode ON (/cmd_vel enabled)" << std::endl;
+            }
+            else
+            {
+                this->control.x = this->params.Get<float>("fixed_cmd_x", 0.6f);
+                this->control.y = this->params.Get<float>("fixed_cmd_y", 0.0f);
+                this->control.yaw = this->params.Get<float>("fixed_cmd_yaw", 0.0f);
+                this->control.navigation_mode = false;
+                std::cout << std::endl << LOGGER::INFO << "Key[1] pressed: fixed cmd x=" << this->control.x
+                          << " y=" << this->control.y << " yaw=" << this->control.yaw << std::endl;
+            }
             this->control.last_keyboard = Input::Keyboard::Num1;
         }
     }

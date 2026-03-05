@@ -76,6 +76,28 @@
   - `policy/go2`
   - `policy/go2_x5`
 
+#### 7) sim2sim 模式对齐到 go2_x5 真机按键流
+- 文件：
+  - `src/rl_sar/library/core/rl_sdk/rl_sdk.cpp`
+  - `src/rl_sar/src/rl_real_go2_x5.cpp`
+  - `src/rl_sar/include/rl_real_go2_x5.hpp`
+  - `src/rl_sar/include/go2_x5_control_logic.hpp`
+  - `policy/go2_x5/robot_lab/config.yaml`
+  - `src/rl_sar/test/test_go2_x5_control_logic.cpp`
+  - `src/rl_sar/CMakeLists.txt`
+- 改动：
+  - `Key[1]` 增加可配置行为：
+    - `key1_prefer_navigation_mode: true` 时进入 RL 后默认开启导航模式（`/cmd_vel`）。
+    - `false` 时保持原固定速度 `fixed_cmd_*`。
+  - `Key[2]` 改为“话题优先 + 回退链路”：
+    - 优先使用最近收到的 `/arm_joint_pos_cmd`。
+    - 无可用话题时回退 `arm_key_pose`，再回退 `arm_hold_pose`。
+  - 保留 `Key[3]` 恢复默认机械臂姿态逻辑不变。
+  - 新增纯函数控制选择层 `go2_x5_control_logic.hpp`，并由真机逻辑复用。
+  - 新增单测 `test_go2_x5_control_logic`，覆盖 `Key[1]/Key[2]` 语义与回退链路。
+- 结果：
+  - 真机按键流程与 sim2sim 风格对齐，更接近“0 起身 / 1 RL指令驱动 / 2 机械臂到发布位姿 / 3 机械臂复原”的部署诉求。
+
 ### 文档同步
 - 更新：
   - `README.md`
@@ -88,7 +110,7 @@
   - `cmake --build cmake_build -j4` 通过
 - 测试：
   - `ctest --test-dir cmake_build --output-on-failure`
-  - 结果：`2/2` 通过
+  - 结果：`3/3` 通过
 
 ### Jetson 运行注意
 - 本次改动优先保证高频循环精度与并发稳定性，适合 Jetson 上 200Hz~500Hz 控制回路。

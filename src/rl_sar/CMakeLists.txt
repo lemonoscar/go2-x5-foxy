@@ -788,6 +788,9 @@ if(USE_CMAKE AND BUILD_TESTING)
 
     add_executable(test_joint_mapping_validation test/test_joint_mapping_validation.cpp)
     add_test(NAME test_joint_mapping_validation COMMAND test_joint_mapping_validation)
+
+    add_executable(test_go2_x5_control_logic test/test_go2_x5_control_logic.cpp)
+    add_test(NAME test_go2_x5_control_logic COMMAND test_go2_x5_control_logic)
 endif()
 
 # add_executable(test_observation_buffer test/test_observation_buffer.cpp)
