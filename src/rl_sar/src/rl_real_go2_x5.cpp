@@ -937,6 +937,17 @@ void RL_Real_Go2X5::GetState(RobotState<float> *state)
         this->control.yaw = -joy_rx;
     }
 
+    if (this->control.navigation_mode)
+    {
+        std::lock_guard<std::mutex> cmd_lock(this->cmd_vel_mutex);
+        if (this->cmd_vel_has_filtered)
+        {
+            this->control.x = static_cast<float>(this->cmd_vel_filtered.linear.x);
+            this->control.y = static_cast<float>(this->cmd_vel_filtered.linear.y);
+            this->control.yaw = static_cast<float>(this->cmd_vel_filtered.angular.z);
+        }
+    }
+
     state->imu.quaternion[0] = imu_quat[0]; // w
     state->imu.quaternion[1] = imu_quat[1]; // x
     state->imu.quaternion[2] = imu_quat[2]; // y
@@ -1097,7 +1108,16 @@ void RL_Real_Go2X5::RobotControl()
 void RL_Real_Go2X5::MaybePublishKey1CmdVel()
 {
 #if !defined(USE_CMAKE) && defined(USE_ROS)
-    if (this->control.current_keyboard != Input::Keyboard::Num1 || !this->control.navigation_mode)
+    if (!this->control.navigation_mode)
+    {
+        this->key1_navigation_cmd_published = false;
+        return;
+    }
+    if (this->control.current_keyboard != Input::Keyboard::Num1)
+    {
+        return;
+    }
+    if (this->key1_navigation_cmd_published)
     {
         return;
     }
@@ -1124,6 +1144,10 @@ void RL_Real_Go2X5::MaybePublishKey1CmdVel()
         this->cmd_vel_filtered = msg;
         this->cmd_vel_has_filtered = true;
     }
+    this->control.x = static_cast<float>(msg.linear.x);
+    this->control.y = static_cast<float>(msg.linear.y);
+    this->control.yaw = static_cast<float>(msg.angular.z);
+    this->key1_navigation_cmd_published = true;
 
 #if defined(USE_ROS1) && defined(USE_ROS)
     if (this->cmd_vel_publisher)

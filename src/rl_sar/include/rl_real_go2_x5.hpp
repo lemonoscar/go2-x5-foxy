@@ -154,6 +154,7 @@ private:
 
     float cmd_vel_alpha = 0.2f;
     bool cmd_vel_has_filtered = false;
+    bool key1_navigation_cmd_published = false;
 
     int arm_command_size = 0;
     bool arm_hold_enabled = true;
