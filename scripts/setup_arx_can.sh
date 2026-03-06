@@ -57,7 +57,7 @@ sudo modprobe slcan
 
 print_info "Restarting slcand on ${CAN_IF}..."
 sudo pkill slcand || true
-sudo ip link set "${CAN_IF}" down || true
+sudo ip link set "${CAN_IF}" down >/dev/null 2>&1 || true
 sudo slcand -o -c -f "-s${SLCAN_SPEED_CODE}" "${CAN_DEV}" "${CAN_IF}"
 
 sleep 1

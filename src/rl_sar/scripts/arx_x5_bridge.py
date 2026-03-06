@@ -758,6 +758,8 @@ def main(args=None):
     node = ArxX5BridgeNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
         rclpy.shutdown()
