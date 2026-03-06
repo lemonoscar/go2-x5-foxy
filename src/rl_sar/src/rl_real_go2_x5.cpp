@@ -111,7 +111,9 @@ RL_Real_Go2X5::RL_Real_Go2X5(int argc, char **argv)
 
     std::cout << LOGGER::INFO << "Real deploy target: go2_x5" << std::endl;
     std::cout << LOGGER::INFO << "arm_joint_command_topic: " << this->arm_joint_command_topic
-              << ", arm_hold_enabled: " << (this->arm_hold_enabled ? "true" : "false") << std::endl;
+              << ", arm_hold_enabled: " << (this->arm_hold_enabled ? "true" : "false")
+              << ", arm_lock: " << (this->params.Get<bool>("arm_lock", false) ? "true" : "false")
+              << std::endl;
 
     // loop
     std::cout << LOGGER::INFO << "[Boot] Starting control loops" << std::endl;

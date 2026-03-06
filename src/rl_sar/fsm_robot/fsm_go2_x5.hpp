@@ -172,11 +172,16 @@ public:
             if (rl.params.Get<bool>("arm_lock", false))
             {
                 const int arm_size = rl.params.Get<int>("arm_command_size", 0);
-                if (arm_size > 0 && rl.now_state.motor_state.q.size() >= static_cast<size_t>(arm_size))
+                const int num_dofs = rl.params.Get<int>("num_of_dofs");
+                const int arm_start = rl.params.Get<int>("arm_joint_start_index",
+                    std::max(0, num_dofs - arm_size));
+                if (arm_size > 0 &&
+                    arm_start >= 0 &&
+                    rl.now_state.motor_state.q.size() >= static_cast<size_t>(arm_start + arm_size))
                 {
-                    const size_t arm_start = rl.now_state.motor_state.q.size() - static_cast<size_t>(arm_size);
-                    rl.arm_lock_pose_runtime.assign(rl.now_state.motor_state.q.begin() + static_cast<long>(arm_start),
-                                                    rl.now_state.motor_state.q.end());
+                    rl.arm_lock_pose_runtime.assign(
+                        rl.now_state.motor_state.q.begin() + static_cast<long>(arm_start),
+                        rl.now_state.motor_state.q.begin() + static_cast<long>(arm_start + arm_size));
                     rl.arm_lock_pose_runtime_valid = true;
                 }
                 const auto &lock_pose = rl.arm_lock_pose_runtime_valid

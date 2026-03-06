@@ -729,9 +729,12 @@ void RLFSMState::RLControl()
         const int arm_size = rl.params.Get<int>("arm_command_size", 0);
         if (arm_size > 0 && num_dofs >= arm_size)
         {
-            const int arm_start = num_dofs - arm_size;
+            const int arm_start = rl.params.Get<int>("arm_joint_start_index", std::max(0, num_dofs - arm_size));
             const auto default_pos = rl.params.Get<std::vector<float>>("default_dof_pos");
-            const auto arm_lock_pose = rl.params.Get<std::vector<float>>("arm_lock_pose");
+            const auto arm_lock_pose = rl.arm_lock_pose_runtime_valid &&
+                                               rl.arm_lock_pose_runtime.size() == static_cast<size_t>(arm_size)
+                                           ? rl.arm_lock_pose_runtime
+                                           : rl.params.Get<std::vector<float>>("arm_lock_pose");
             const auto fixed_kp = rl.params.Get<std::vector<float>>("fixed_kp");
             const auto fixed_kd = rl.params.Get<std::vector<float>>("fixed_kd");
             for (int i = 0; i < arm_size; ++i)

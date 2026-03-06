@@ -161,13 +161,19 @@ Go2-X5 机械臂快捷键：
 - `3`：机械臂恢复默认姿态
 - `4`：机械臂保持 ON/OFF
 
+默认真机配置为 `arm_hold_enabled: true`、`arm_lock: false`：
+
+- 不按 `2` 时，机械臂保持在 `arm_hold_pose`
+- 发布 `/arm_joint_pos_cmd` 后按 `2`，机械臂把该 6 维目标接管为新的保持位姿
+- 若主控一直提示 `Arm bridge state is missing or stale`，机械臂会停留在 shadow/hold，不会真正跟随桥接状态
+
 ## Go2-X5 Sim2Real 按键流程
 
 推荐部署流程：
 
 1. 按 `0`，机器人起身。
 2. 按 `1`，进入 RL 状态，默认从 `/cmd_vel` 取指令。
-3. 向 `/arm_joint_pos_cmd` 发布机械臂目标后按 `2`，机械臂到达并保持该目标。
+3. 确认主控出现 `Arm bridge state stream detected` 后，再向 `/arm_joint_pos_cmd` 发布机械臂目标并按 `2`，机械臂到达并保持该目标。
 4. 按 `3`，机械臂恢复默认位姿。
 
 ## 最小可复现 Sim2Real 流程（Jetson + Go2-X5）

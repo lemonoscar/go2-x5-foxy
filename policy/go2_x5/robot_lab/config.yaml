@@ -111,8 +111,9 @@ go2_x5/robot_lab:
   # true  -> use latest received /arm_joint_pos_cmd, fallback to arm_key_pose/arm_hold_pose
   # false -> skip topic command and use arm_key_pose/arm_hold_pose directly
   key2_prefer_topic_command: true
-  # Real deployment default: lock arm for stable first rollout.
-  arm_lock: true
+  # Real deployment default: keep arm via hold pose, not RL arm lock.
+  # arm_hold_enabled already clamps the arm to arm_hold_pose until an explicit arm target is applied.
+  arm_lock: false
   arm_lock_pose: [0, 1.57, 1.57, 0.0, 0.0, 0.0]
   # When arm pose command is active (Key[2]), lock base pose to avoid spinning
   arm_lock_base_on_pose: false

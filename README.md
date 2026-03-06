@@ -161,13 +161,19 @@ Go2-X5 arm shortcuts:
 - `3`: restore default arm pose
 - `4`: arm hold ON/OFF
 
+Default real deployment now uses `arm_hold_enabled: true` and `arm_lock: false`:
+
+- without `2`, the arm stays at `arm_hold_pose`
+- publish `/arm_joint_pos_cmd`, then press `2` to replace the hold target with that 6-DoF arm pose
+- if the main process keeps warning `Arm bridge state is missing or stale`, the arm stays in shadow/hold and does not follow live bridge state
+
 ## Go2-X5 Sim2Real Key Flow
 
 Target flow for deployment:
 
 1. Press `0` -> robot gets up.
 2. Press `1` -> enter RL state; by default commands are from `/cmd_vel`.
-3. Publish arm target to `/arm_joint_pos_cmd`, then press `2` -> arm moves/holds at that published target.
+3. Wait until the main process prints `Arm bridge state stream detected`, then publish `/arm_joint_pos_cmd` and press `2` -> arm moves/holds at that published target.
 4. Press `3` -> arm returns to default pose.
 
 ## Minimal Reproducible Sim2Real (Jetson, Go2-X5)
