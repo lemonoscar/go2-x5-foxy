@@ -2,6 +2,97 @@
 
 ## 2026-03-06
 
+### 冷启动恢复与再联通成功经验
+
+#### 结论
+- 机器狗断电或 Jetson 重启后，需要重新完成：
+  - ROS 环境 `source`
+  - USB-CAN 枚举确认
+  - `can0` bringup
+  - `arx_x5_bridge.py`
+  - `rl_real_go2_x5`
+- 这轮成功链路已经明确：
+  - `arm_hold_enabled: true`
+  - `arm_lock: false`
+  - 主控启动后必须看到 `Arm bridge state stream detected`
+  - 联动主控时，用户只发布 `/arm_joint_pos_cmd`，不要再手工发布 `/arx_x5/joint_cmd`
+
+#### 冷启动标准流程
+
+1. 进入工作区并更新代码（如果远端有新提交）
+   - `cd ~/rl_ras_n`
+   - `git pull`
+
+2. 重新加载 ROS 与工作区环境
+   - `source /opt/ros/foxy/setup.bash`
+   - `source ~/rl_ras_n/install/setup.bash`
+
+3. 确认 USB-CAN 实际设备名
+   - `ls -l /dev/ttyACM* /dev/ttyUSB* 2>/dev/null`
+   - 不要写死 `/dev/ttyACM0`
+   - 这轮现场成功设备是 `/dev/ttyACM1`
+
+4. 重新 bringup `can0`
+   - `./scripts/setup_arx_can.sh /dev/ttyACM1 can0 8`
+   - `ip -s -d link show can0`
+
+5. 终端 A 启动 X5 bridge
+   - `export ROS_LOCALHOST_ONLY=1`
+   - `export ROS_DOMAIN_ID=42`
+   - `export ARX5_SDK_ROOT=/home/unitree/arx5-sdk`
+   - `export ARX5_SDK_PYTHON_PATH=/home/unitree/arx5-sdk/python`
+   - `export ARX5_SDK_LIB_PATH=/home/unitree/arx5-sdk/lib/aarch64`
+   - `RMW_IMPLEMENTATION=rmw_fastrtps_cpp ros2 run rl_sar arx_x5_bridge.py --ros-args -p interface_name:=can0 -p require_sdk:=true -p require_initial_state:=true`
+
+6. 终端 B 启动主控
+   - `export ROS_LOCALHOST_ONLY=1`
+   - `export ROS_DOMAIN_ID=42`
+   - `RMW_IMPLEMENTATION=rmw_fastrtps_cpp ros2 run rl_sar rl_real_go2_x5 eth0`
+
+#### 主控联动判定条件
+- 主控启动日志必须出现：
+  - `arm_joint_command_topic: /arm_joint_pos_cmd, arm_hold_enabled: true, arm_lock: false`
+  - `Arm bridge state stream detected: topic=/arx_x5/joint_state, dof=6`
+- 若一直只有：
+  - `Arm bridge state is missing or stale. Using shadow arm state until bridge recovers.`
+  - 说明主控没有拿到机械臂真实状态，不能继续做 arm 联动测试
+
+#### 主控 + 机械臂联动操作顺序
+
+1. 主控终端按 `0`
+   - 机器人起身
+
+2. 如果先测机械臂，不要先按 `1`
+   - 先保持站立，确认 arm 联动稳定
+
+3. 新终端发布 6 维机械臂目标到 `/arm_joint_pos_cmd`
+   - 示例：
+   - `ros2 topic pub --once /arm_joint_pos_cmd std_msgs/msg/Float32MultiArray "{data: [0.60,3.00,1.00,0.20,0.00,0.00]}"`
+
+4. 回到主控终端按 `2`
+   - 主控会把最近一次 `/arm_joint_pos_cmd` 接管为新的 `arm_hold_pose`
+   - 然后通过 `/arx_x5/joint_cmd` 发给 bridge
+   - bridge 再下发到真实机械臂
+
+5. 机械臂运动稳定后，再按 `1`
+   - 底座进入 RL
+   - 机械臂继续保持刚才通过 `2` 设进去的姿态
+
+6. 按 `3`
+   - 机械臂恢复默认姿态
+
+#### 本轮收敛出的关键经验
+- 机械臂单独通过 bridge 可动，不代表主控联动已经通；主控必须拿到 `/arx_x5/joint_state`
+- 联动主控时：
+  - `/arx_x5/joint_cmd` 是内部桥接话题
+  - 用户应该操作的是 `/arm_joint_pos_cmd` + 主控按键 `2`
+- 之前“bridge 一接上就乱飞”的根因不是 CAN，而是主控在 `Passive/GetUp` 阶段把不安全的 arm 指令透传给了 bridge
+- 当前已修复：
+  - `WriteArmCommandToExternal()` 在 `arm_hold_enabled=true` 时，优先发送 `arm_hold_position + fixed_kp/fixed_kd`
+  - 启动阶段不再把脏 `q/kd` 直接推给机械臂
+- 仍需注意：
+  - 如果现场机械臂当前物理姿态与 `arm_hold_pose` 差很大，主控启动后会主动回到 hold pose；这属于受控回位，不是随机乱飞
+
 ### WARNING
 - USB-CAN 设备的 `/dev/ttyACM*` 编号不是固定值，不要写死成 `/dev/ttyACM0`。
 - 现场联调前先执行：
