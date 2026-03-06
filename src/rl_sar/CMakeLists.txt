@@ -791,6 +791,10 @@ if(USE_CMAKE AND BUILD_TESTING)
 
     add_executable(test_go2_x5_control_logic test/test_go2_x5_control_logic.cpp)
     add_test(NAME test_go2_x5_control_logic COMMAND test_go2_x5_control_logic)
+
+    add_executable(test_go2_x5_arm_bridge_defaults test/test_go2_x5_arm_bridge_defaults.cpp)
+    target_compile_definitions(test_go2_x5_arm_bridge_defaults PRIVATE RL_SAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME test_go2_x5_arm_bridge_defaults COMMAND test_go2_x5_arm_bridge_defaults)
 endif()
 
 # add_executable(test_observation_buffer test/test_observation_buffer.cpp)

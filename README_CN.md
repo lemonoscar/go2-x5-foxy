@@ -71,6 +71,24 @@ ros2 run rl_sar rl_sim
 
 ## Go2-X5 真机运行
 
+### ARX 机械臂 CAN bringup
+
+根据 `logs.md` 的最新排查，X5 机械臂真机链路最容易卡在 SocketCAN bringup 和机械臂上电/接线阶段。先完成 CAN 初始化，再启动双进程：
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+./scripts/setup_arx_can.sh /dev/ttyACM0 can0 8
+```
+
+等价环境变量写法：
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+CAN_DEV=/dev/ttyACM0 CAN_IF=can0 SLCAN_SPEED_CODE=8 ./scripts/setup_arx_can.sh
+```
+
+若 `ip -s -d link show can0` 中 `RX` 持续为 `0`，说明当前不是软件链路问题，而是机械臂电源/CAN 接线/波特率/USB-CAN 适配器侧还未打通。
+
 ### 单进程
 
 ```bash
@@ -88,6 +106,39 @@ export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
 ros2 launch rl_sar go2_x5_real_dual.launch.py \
   network_interface:=eth0 \
   arm_interface_name:=can0 \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+默认双进程启动参数会在机械臂 SDK 不可用时退化到 `shadow-only mode`，避免 ARX 原生库初始化失败时直接把整个流程炸掉。真机联调建议分两步：
+
+1. 先用 `arm_dry_run:=true` 做软件烟测，确认 `/cmd_vel`、`/arm_joint_pos_cmd`、FSM 和安全退出链路正常。
+2. 再切到严格实机模式，显式要求 SDK 和初始状态都可用。
+
+### 软件烟测（无机械臂也能打通链路）
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  arm_dry_run:=true \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+### 严格实机模式（机械臂必须真连通）
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  arm_require_sdk:=true \
+  arm_require_initial_state:=true \
   bridge_rmw_implementation:=rmw_cyclonedds_cpp \
   go2_rmw_implementation:=rmw_fastrtps_cpp
 ```
@@ -128,6 +179,13 @@ Go2-X5 机械臂快捷键：
 - 已配置 `ARX5_SDK_ROOT`（例如 `/home/unitree/arx5-sdk`）。
 - 仓库已通过 `./build.sh` 完成编译。
 
+先完成 CAN bringup：
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+./scripts/setup_arx_can.sh /dev/ttyACM0 can0 8
+```
+
 终端 1（启动真机双进程：腿 + 机械臂桥）：
 
 ```bash
@@ -137,6 +195,8 @@ export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
 ros2 launch rl_sar go2_x5_real_dual.launch.py \
   network_interface:=eth0 \
   arm_interface_name:=can0 \
+  arm_require_sdk:=true \
+  arm_require_initial_state:=true \
   bridge_rmw_implementation:=rmw_cyclonedds_cpp \
   go2_rmw_implementation:=rmw_fastrtps_cpp
 ```
@@ -185,6 +245,12 @@ ros2 topic hz /arx_x5/joint_state
 ros2 topic echo --once /arx_x5/joint_cmd
 ```
 
+故障定位：
+
+- `candump can0` 无输出，且 `ip -s -d link show can0` 的 `RX=0`：优先检查机械臂是否上电、CAN 线序、SLCAN 速率码、USB-CAN 适配器。
+- 双进程启动后若 bridge 日志提示 `shadow-only mode`：说明软件链路已存活，但机械臂 SDK/总线握手未成功。
+- `/arm_joint_pos_cmd` 现在要求一次发布完整的 `6` 维目标，短消息会被忽略，避免保留半旧半新的目标位姿。
+
 ## Jetson 注意事项
 
 - 本分支优先优化了高频控制循环计时精度与并发安全。
@@ -209,6 +275,7 @@ ctest --test-dir cmake_build --output-on-failure
 - `test_loop_timing_precision`
 - `test_joint_mapping_validation`
 - `test_go2_x5_control_logic`
+- `test_go2_x5_arm_bridge_defaults`
 
 ## 目录说明
 

@@ -416,11 +416,19 @@ void RL_Real_Go2X5::InitializeArmCommandState()
     else
     {
         const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos", {});
-        if (default_pos.size() >= static_cast<size_t>(this->arm_command_size))
+        const int arm_start = std::max(0, this->arm_joint_start_index);
+        if (default_pos.size() >= static_cast<size_t>(arm_start + this->arm_command_size))
         {
-            const size_t arm_start = default_pos.size() - static_cast<size_t>(this->arm_command_size);
             this->arm_hold_position.assign(
                 default_pos.begin() + static_cast<long>(arm_start),
+                default_pos.begin() + static_cast<long>(arm_start + this->arm_command_size)
+            );
+        }
+        else if (default_pos.size() >= static_cast<size_t>(this->arm_command_size))
+        {
+            const size_t fallback_arm_start = default_pos.size() - static_cast<size_t>(this->arm_command_size);
+            this->arm_hold_position.assign(
+                default_pos.begin() + static_cast<long>(fallback_arm_start),
                 default_pos.end()
             );
         }
@@ -1028,12 +1036,13 @@ void RL_Real_Go2X5::RobotControl()
             arm_command_size_local = this->arm_command_size;
         }
         const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos", {});
-        if (arm_command_size_local > 0 && default_pos.size() >= static_cast<size_t>(arm_command_size_local))
+        const int arm_start = std::max(0, this->arm_joint_start_index);
+        if (arm_command_size_local > 0 &&
+            default_pos.size() >= static_cast<size_t>(arm_start + arm_command_size_local))
         {
-            const size_t arm_start = default_pos.size() - static_cast<size_t>(arm_command_size_local);
             std::vector<float> pose(
                 default_pos.begin() + static_cast<long>(arm_start),
-                default_pos.end()
+                default_pos.begin() + static_cast<long>(arm_start + arm_command_size_local)
             );
             this->ApplyArmHold(pose, "Key[3] pressed: arm restore default");
         }
@@ -1171,9 +1180,10 @@ void RL_Real_Go2X5::RunModel()
     if (!this->output_dof_pos.empty() && arm_hold_enabled_local && !arm_hold_local.empty())
     {
         const int num_dofs = this->params.Get<int>("num_of_dofs");
-        if (arm_command_size_local > 0 && num_dofs >= arm_command_size_local)
+        const int arm_start = std::max(0, this->arm_joint_start_index);
+        if (arm_command_size_local > 0 &&
+            (arm_start + arm_command_size_local) <= num_dofs)
         {
-            const int arm_start = num_dofs - arm_command_size_local;
             for (int i = 0; i < arm_command_size_local; ++i)
             {
                 const size_t idx = static_cast<size_t>(arm_start + i);
@@ -1199,17 +1209,20 @@ void RL_Real_Go2X5::RunModel()
         if (!bridge_state_fresh && !arm_hold_local.empty() && arm_command_size_local > 0)
         {
             const int num_dofs = this->params.Get<int>("num_of_dofs");
-            const int arm_start = std::max(0, num_dofs - arm_command_size_local);
-            for (int i = 0; i < arm_command_size_local; ++i)
+            const int arm_start = std::max(0, this->arm_joint_start_index);
+            if ((arm_start + arm_command_size_local) <= num_dofs)
             {
-                const size_t idx = static_cast<size_t>(arm_start + i);
-                if (idx < this->output_dof_pos.size() && i < static_cast<int>(arm_hold_local.size()))
+                for (int i = 0; i < arm_command_size_local; ++i)
                 {
-                    this->output_dof_pos[idx] = arm_hold_local[static_cast<size_t>(i)];
-                }
-                if (idx < this->output_dof_vel.size())
-                {
-                    this->output_dof_vel[idx] = 0.0f;
+                    const size_t idx = static_cast<size_t>(arm_start + i);
+                    if (idx < this->output_dof_pos.size() && i < static_cast<int>(arm_hold_local.size()))
+                    {
+                        this->output_dof_pos[idx] = arm_hold_local[static_cast<size_t>(i)];
+                    }
+                    if (idx < this->output_dof_vel.size())
+                    {
+                        this->output_dof_vel[idx] = 0.0f;
+                    }
                 }
             }
         }
@@ -1476,6 +1489,13 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
     {
         return;
     }
+    if (msg->data.size() < static_cast<size_t>(this->arm_command_size))
+    {
+        std::cout << LOGGER::WARNING
+                  << "Ignore /arm_joint_pos_cmd: expect " << this->arm_command_size
+                  << " values, got " << msg->data.size() << std::endl;
+        return;
+    }
     if (this->arm_joint_command_latest.size() != static_cast<size_t>(this->arm_command_size))
     {
         this->arm_joint_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
@@ -1485,13 +1505,13 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
         this->arm_topic_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
     }
 
-    const size_t count = std::min(static_cast<size_t>(this->arm_command_size), msg->data.size());
+    const size_t count = static_cast<size_t>(this->arm_command_size);
     for (size_t i = 0; i < count; ++i)
     {
         this->arm_joint_command_latest[i] = msg->data[i];
         this->arm_topic_command_latest[i] = msg->data[i];
     }
-    this->arm_topic_command_received = (count > 0);
+    this->arm_topic_command_received = true;
 }
 
 void RL_Real_Go2X5::ArmBridgeStateCallback(

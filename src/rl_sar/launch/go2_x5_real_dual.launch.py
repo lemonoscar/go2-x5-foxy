@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, Shutdown
 from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration
 from launch_ros.actions import Node
@@ -26,6 +26,8 @@ def generate_launch_description():
     arm_sdk_lib_path = LaunchConfiguration("arm_sdk_lib_path")
     arm_require_sdk = LaunchConfiguration("arm_require_sdk")
     arm_require_initial_state = LaunchConfiguration("arm_require_initial_state")
+    arm_probe_backend_before_init = LaunchConfiguration("arm_probe_backend_before_init")
+    arm_probe_timeout_sec = LaunchConfiguration("arm_probe_timeout_sec")
     arm_enable_background_send_recv = LaunchConfiguration("arm_enable_background_send_recv")
     arm_controller_dt = LaunchConfiguration("arm_controller_dt")
     arm_init_to_home = LaunchConfiguration("arm_init_to_home")
@@ -38,6 +40,7 @@ def generate_launch_description():
         name="arx_x5_bridge",
         output="screen",
         condition=IfCondition(start_arm_bridge),
+        on_exit=Shutdown(reason="arx_x5_bridge exited"),
         additional_env={"RMW_IMPLEMENTATION": bridge_rmw_implementation},
         parameters=[
             {
@@ -56,6 +59,8 @@ def generate_launch_description():
                 "sdk_lib_path": arm_sdk_lib_path,
                 "require_sdk": arm_require_sdk,
                 "require_initial_state": arm_require_initial_state,
+                "probe_backend_before_init": arm_probe_backend_before_init,
+                "probe_timeout_sec": arm_probe_timeout_sec,
                 "enable_background_send_recv": arm_enable_background_send_recv,
                 "controller_dt": arm_controller_dt,
                 "init_to_home": arm_init_to_home,
@@ -89,8 +94,10 @@ def generate_launch_description():
             DeclareLaunchArgument("arm_sdk_root", default_value=EnvironmentVariable("ARX5_SDK_ROOT", default_value="")),
             DeclareLaunchArgument("arm_sdk_python_path", default_value=EnvironmentVariable("ARX5_SDK_PYTHON_PATH", default_value="")),
             DeclareLaunchArgument("arm_sdk_lib_path", default_value=EnvironmentVariable("ARX5_SDK_LIB_PATH", default_value="")),
-            DeclareLaunchArgument("arm_require_sdk", default_value="true"),
-            DeclareLaunchArgument("arm_require_initial_state", default_value="true"),
+            DeclareLaunchArgument("arm_require_sdk", default_value="false"),
+            DeclareLaunchArgument("arm_require_initial_state", default_value="false"),
+            DeclareLaunchArgument("arm_probe_backend_before_init", default_value="true"),
+            DeclareLaunchArgument("arm_probe_timeout_sec", default_value="5.0"),
             DeclareLaunchArgument("arm_enable_background_send_recv", default_value="false"),
             DeclareLaunchArgument("arm_controller_dt", default_value="0.002"),
             DeclareLaunchArgument("arm_init_to_home", default_value="false"),

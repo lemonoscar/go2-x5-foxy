@@ -71,6 +71,24 @@ ros2 run rl_sar rl_sim
 
 ## Go2-X5 Real Robot
 
+### ARX arm CAN bringup
+
+Based on the latest `logs.md`, the most common field failure is not the ROS graph itself, but SocketCAN bringup plus missing arm power/CAN response. Bring up CAN before starting the dual-process stack:
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+./scripts/setup_arx_can.sh /dev/ttyACM0 can0 8
+```
+
+Equivalent env-driven form:
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+CAN_DEV=/dev/ttyACM0 CAN_IF=can0 SLCAN_SPEED_CODE=8 ./scripts/setup_arx_can.sh
+```
+
+If `ip -s -d link show can0` keeps reporting `RX=0`, the issue is still on the arm power/CAN wiring/adapter side, not the higher-level sim2real stack.
+
 ### Single process
 
 ```bash
@@ -88,6 +106,39 @@ export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
 ros2 launch rl_sar go2_x5_real_dual.launch.py \
   network_interface:=eth0 \
   arm_interface_name:=can0 \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+The default dual-process launch now falls back to `shadow-only mode` when the arm SDK/backend is unavailable, instead of letting a failed native init kill the whole software chain. Recommended bringup sequence:
+
+1. Run a software smoke test with `arm_dry_run:=true`.
+2. Switch to strict real-arm mode and require both SDK availability and a valid initial state.
+
+### Software smoke test (no arm hardware required)
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  arm_dry_run:=true \
+  bridge_rmw_implementation:=rmw_cyclonedds_cpp \
+  go2_rmw_implementation:=rmw_fastrtps_cpp
+```
+
+### Strict real-arm mode
+
+```bash
+source /opt/ros/foxy/setup.bash
+source /home/lemon/Issac/rl_ras_n/install/setup.bash
+export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
+ros2 launch rl_sar go2_x5_real_dual.launch.py \
+  network_interface:=eth0 \
+  arm_interface_name:=can0 \
+  arm_require_sdk:=true \
+  arm_require_initial_state:=true \
   bridge_rmw_implementation:=rmw_cyclonedds_cpp \
   go2_rmw_implementation:=rmw_fastrtps_cpp
 ```
@@ -128,6 +179,13 @@ Assumptions:
 - `ARX5_SDK_ROOT` is available (example: `/home/unitree/arx5-sdk`).
 - Repository has been built by `./build.sh`.
 
+First bring up CAN:
+
+```bash
+cd /home/lemon/Issac/rl_ras_n
+./scripts/setup_arx_can.sh /dev/ttyACM0 can0 8
+```
+
 Terminal 1 (start real deployment, leg + arm bridge):
 
 ```bash
@@ -137,6 +195,8 @@ export ARX5_SDK_ROOT=/home/unitree/arx5-sdk
 ros2 launch rl_sar go2_x5_real_dual.launch.py \
   network_interface:=eth0 \
   arm_interface_name:=can0 \
+  arm_require_sdk:=true \
+  arm_require_initial_state:=true \
   bridge_rmw_implementation:=rmw_cyclonedds_cpp \
   go2_rmw_implementation:=rmw_fastrtps_cpp
 ```
@@ -185,6 +245,12 @@ ros2 topic hz /arx_x5/joint_state
 ros2 topic echo --once /arx_x5/joint_cmd
 ```
 
+Troubleshooting:
+
+- No output from `candump can0`, and `ip -s -d link show can0` stays at `RX=0`: check arm power, CAN wiring, SLCAN speed code, and the USB-CAN adapter first.
+- If the bridge reports `shadow-only mode`, the ROS side is alive but arm SDK/bus handshake did not succeed.
+- `/arm_joint_pos_cmd` now requires a full 6-DoF target in one message; short messages are ignored to avoid half-stale arm targets.
+
 ## Jetson Notes
 
 - This branch prioritizes control-loop timing precision and thread safety for high-frequency loops.
@@ -207,6 +273,7 @@ Current tests:
 - `test_loop_timing_precision`
 - `test_joint_mapping_validation`
 - `test_go2_x5_control_logic`
+- `test_go2_x5_arm_bridge_defaults`
 
 ## Repository Layout
 

@@ -2,12 +2,15 @@
 # Copyright (c) 2024-2026 Ziqi Fan
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
+import json
 import math
 import os
 import platform
+import subprocess
 import sys
 import time
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import rclpy
 from rclpy.node import Node
@@ -55,6 +58,72 @@ def _default_arch_lib_dir(sdk_root: str) -> str:
     machine = platform.machine().lower()
     arch = "aarch64" if ("aarch64" in machine or "arm64" in machine) else "x86_64"
     return os.path.join(sdk_root, "lib", arch)
+
+
+class _ProbeLogger:
+    def __init__(self, prefix: str = "[arx_probe]"):
+        self.prefix = prefix
+
+    def info(self, msg: str) -> None:
+        print(f"{self.prefix} [INFO] {msg}", file=sys.stderr, flush=True)
+
+    def warning(self, msg: str) -> None:
+        print(f"{self.prefix} [WARN] {msg}", file=sys.stderr, flush=True)
+
+    def error(self, msg: str) -> None:
+        print(f"{self.prefix} [ERROR] {msg}", file=sys.stderr, flush=True)
+
+
+def _prepare_sdk_environment_values(
+    sdk_root: str,
+    sdk_python_path: str,
+    sdk_lib_path: str,
+    logger: Any,
+) -> Tuple[str, str]:
+    if sdk_root:
+        if not sdk_python_path:
+            candidate = os.path.join(sdk_root, "python")
+            if os.path.isdir(candidate):
+                sdk_python_path = candidate
+        if not sdk_lib_path:
+            candidate = _default_arch_lib_dir(sdk_root)
+            if os.path.isdir(candidate):
+                sdk_lib_path = candidate
+
+    if sdk_python_path:
+        _prepend_sys_path(sdk_python_path)
+        logger.info(f"Use ARX python path: {sdk_python_path}")
+    if sdk_lib_path:
+        _prepend_env_path("LD_LIBRARY_PATH", sdk_lib_path)
+        logger.info(f"Use ARX library path: {sdk_lib_path}")
+
+    return sdk_python_path, sdk_lib_path
+
+
+def _extract_last_json_line(output: str) -> Optional[Dict[str, Any]]:
+    for raw_line in reversed(output.splitlines()):
+        line = raw_line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _summarize_process_output(stdout_text: str, stderr_text: str) -> str:
+    lines = []
+    for text in (stdout_text, stderr_text):
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if line:
+                lines.append(line)
+    if not lines:
+        return ""
+    return " | ".join(lines[-6:])
 
 
 class ArxBackend:
@@ -382,8 +451,10 @@ class ArxX5BridgeNode(Node):
         self.declare_parameter("sdk_root", "")
         self.declare_parameter("sdk_python_path", "")
         self.declare_parameter("sdk_lib_path", "")
-        self.declare_parameter("require_sdk", True)
-        self.declare_parameter("require_initial_state", True)
+        self.declare_parameter("require_sdk", False)
+        self.declare_parameter("require_initial_state", False)
+        self.declare_parameter("probe_backend_before_init", True)
+        self.declare_parameter("probe_timeout_sec", 5.0)
         self.declare_parameter("enable_background_send_recv", True)
         self.declare_parameter("controller_dt", 0.002)
         self.declare_parameter("init_to_home", False)
@@ -403,6 +474,8 @@ class ArxX5BridgeNode(Node):
         self.sdk_lib_path = str(self.get_parameter("sdk_lib_path").value)
         self.require_sdk = bool(self.get_parameter("require_sdk").value)
         self.require_initial_state = bool(self.get_parameter("require_initial_state").value)
+        self.probe_backend_before_init = bool(self.get_parameter("probe_backend_before_init").value)
+        self.probe_timeout_sec = max(0.5, float(self.get_parameter("probe_timeout_sec").value))
         self.enable_background_send_recv = bool(self.get_parameter("enable_background_send_recv").value)
         self.controller_dt = float(self.get_parameter("controller_dt").value)
         self.init_to_home = bool(self.get_parameter("init_to_home").value)
@@ -422,24 +495,37 @@ class ArxX5BridgeNode(Node):
         if self.dry_run:
             self.get_logger().warning("ARX bridge running in dry_run mode.")
         else:
-            self.backend = ArxBackend(
-                model=self.model,
-                interface_name=self.interface_name,
-                urdf_path=self.urdf_path,
-                logger=self.get_logger(),
-                enable_background_send_recv=self.enable_background_send_recv,
-                controller_dt=self.controller_dt,
-                init_to_home=self.init_to_home,
-                require_initial_state=self.require_initial_state,
-            )
+            probe_ok = True
+            if self.probe_backend_before_init:
+                # Some ARX SDK builds are not safe to probe in-process on transport failure.
+                probe_ok, probe_message = self._probe_backend()
+                if not probe_ok:
+                    msg = f"ARX backend probe failed: {probe_message}"
+                    if self.require_sdk:
+                        raise RuntimeError(msg)
+                    self.get_logger().warning(msg + " Continue in shadow-only mode.")
+                else:
+                    self.get_logger().info(f"ARX backend probe passed: {probe_message}")
 
-            if self.backend.backend_name == "none":
+            if probe_ok:
+                self.backend = ArxBackend(
+                    model=self.model,
+                    interface_name=self.interface_name,
+                    urdf_path=self.urdf_path,
+                    logger=self.get_logger(),
+                    enable_background_send_recv=self.enable_background_send_recv,
+                    controller_dt=self.controller_dt,
+                    init_to_home=self.init_to_home,
+                    require_initial_state=self.require_initial_state,
+                )
+
+            if self.backend is not None and self.backend.backend_name == "none":
                 msg = "ARX SDK backend not available."
                 if self.require_sdk:
                     raise RuntimeError(msg)
                 self.get_logger().warning(msg + " Continue in shadow-only mode.")
                 self.backend = None
-            else:
+            elif self.backend is not None:
                 if self.backend.joint_count != self.joint_count:
                     self.get_logger().warning(
                         f"joint_count override: launch={self.joint_count}, sdk={self.backend.joint_count}"
@@ -461,23 +547,69 @@ class ArxX5BridgeNode(Node):
             f"cmd_topic={self.cmd_topic}, state_topic={self.state_topic}, N={self.joint_count}"
         )
 
-    def _prepare_sdk_environment(self) -> None:
-        if self.sdk_root:
-            if not self.sdk_python_path:
-                candidate = os.path.join(self.sdk_root, "python")
-                if os.path.isdir(candidate):
-                    self.sdk_python_path = candidate
-            if not self.sdk_lib_path:
-                candidate = _default_arch_lib_dir(self.sdk_root)
-                if os.path.isdir(candidate):
-                    self.sdk_lib_path = candidate
+    def _probe_backend(self) -> Tuple[bool, str]:
+        probe_config = {
+            "model": self.model,
+            "interface_name": self.interface_name,
+            "urdf_path": self.urdf_path,
+            "sdk_root": self.sdk_root,
+            "sdk_python_path": self.sdk_python_path,
+            "sdk_lib_path": self.sdk_lib_path,
+            "enable_background_send_recv": self.enable_background_send_recv,
+            "controller_dt": self.controller_dt,
+            "init_to_home": self.init_to_home,
+            "require_initial_state": self.require_initial_state,
+        }
+        cmd = [
+            sys.executable,
+            os.path.realpath(__file__),
+            "--probe-backend",
+            "--probe-config-json",
+            json.dumps(probe_config, separators=(",", ":")),
+        ]
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=self.probe_timeout_sec,
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"timeout after {self.probe_timeout_sec:.1f}s"
 
-        if self.sdk_python_path:
-            _prepend_sys_path(self.sdk_python_path)
-            self.get_logger().info(f"Use ARX python path: {self.sdk_python_path}")
-        if self.sdk_lib_path:
-            _prepend_env_path("LD_LIBRARY_PATH", self.sdk_lib_path)
-            self.get_logger().info(f"Use ARX library path: {self.sdk_lib_path}")
+        payload = _extract_last_json_line(result.stdout)
+        summary = _summarize_process_output(result.stdout, result.stderr)
+        if result.returncode == 0:
+            backend_name = ""
+            if payload is not None:
+                backend_name = str(payload.get("backend_name", "")).strip()
+            message = backend_name or "backend ready"
+            if summary:
+                message = f"{message} [{summary}]"
+            return True, message
+
+        if payload is not None:
+            message = str(payload.get("error", "")).strip()
+            if not message:
+                message = str(payload)
+        else:
+            message = summary
+        if not message:
+            message = "probe exited without diagnostics"
+        return False, f"{message} (exit={result.returncode})"
+
+    def _prepare_sdk_environment(self) -> None:
+        self.sdk_python_path, self.sdk_lib_path = _prepare_sdk_environment_values(
+            sdk_root=self.sdk_root,
+            sdk_python_path=self.sdk_python_path,
+            sdk_lib_path=self.sdk_lib_path,
+            logger=self.get_logger(),
+        )
 
     def _on_cmd(self, msg: Float32MultiArray) -> None:
         n = self.joint_count
@@ -559,6 +691,69 @@ class ArxX5BridgeNode(Node):
 
 
 def main(args=None):
+    cli_args = list(sys.argv[1:] if args is None else args)
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--probe-backend", action="store_true")
+    parser.add_argument("--probe-config-json", default="")
+    known_args, _ = parser.parse_known_args(cli_args)
+    if known_args.probe_backend:
+        logger = _ProbeLogger()
+        config_json = str(known_args.probe_config_json or "")
+        if not config_json:
+            print(json.dumps({"ok": False, "error": "missing --probe-config-json"}), flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(2)
+        try:
+            config = json.loads(config_json)
+        except json.JSONDecodeError as ex:
+            print(json.dumps({"ok": False, "error": f"invalid probe config json: {ex}"}), flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(2)
+
+        sdk_root = str(config.get("sdk_root", ""))
+        sdk_python_path = str(config.get("sdk_python_path", ""))
+        sdk_lib_path = str(config.get("sdk_lib_path", ""))
+        sdk_python_path, sdk_lib_path = _prepare_sdk_environment_values(
+            sdk_root=sdk_root,
+            sdk_python_path=sdk_python_path,
+            sdk_lib_path=sdk_lib_path,
+            logger=logger,
+        )
+
+        backend = ArxBackend(
+            model=str(config.get("model", "X5")),
+            interface_name=str(config.get("interface_name", "can0")),
+            urdf_path=str(config.get("urdf_path", "")),
+            logger=logger,
+            enable_background_send_recv=bool(config.get("enable_background_send_recv", True)),
+            controller_dt=float(config.get("controller_dt", 0.002)),
+            init_to_home=bool(config.get("init_to_home", False)),
+            require_initial_state=bool(config.get("require_initial_state", False)),
+        )
+        if backend.backend_name == "none":
+            print(json.dumps({"ok": False, "error": "ARX SDK backend not available."}), flush=True)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            os._exit(2)
+
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "backend_name": backend.backend_name,
+                    "joint_count": backend.joint_count,
+                    "sdk_python_path": sdk_python_path,
+                    "sdk_lib_path": sdk_lib_path,
+                }
+            ),
+            flush=True,
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
     rclpy.init(args=args)
     node = ArxX5BridgeNode()
     try:
