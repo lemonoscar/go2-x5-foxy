@@ -26,6 +26,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <atomic>
 
 #if defined(USE_ROS1) && defined(USE_ROS)
 #include <ros/ros.h>
@@ -82,6 +83,7 @@ public:
     RL_Real_Go2X5(int argc, char **argv);
     ~RL_Real_Go2X5();
     void SafeShutdownNow();
+    bool LoopExceptionRequested() const;
 
 #if defined(USE_ROS2) && defined(USE_ROS)
     std::shared_ptr<rclcpp::Node> ros2_node;
@@ -132,11 +134,38 @@ private:
     // arm command helpers
     void InitializeArmCommandState();
     void InitializeArmChannelConfig();
+    void InitializeRealDeploySafetyConfig();
     void SetupArmCommandSubscriber();
     void SetupArmBridgeInterface();
     void ValidateJointMappingOrThrow(const char* stage) const;
     bool IsArmBridgeStateFreshLocked() const;
     bool IsArmJointIndex(int idx) const;
+    bool IsInRLLocomotionState() const;
+    bool UseExclusiveRealDeployControl() const;
+    std::vector<float> GetDefaultWholeBodyLowerLimits() const;
+    std::vector<float> GetDefaultWholeBodyUpperLimits() const;
+    std::vector<float> GetDefaultWholeBodyVelocityLimits() const;
+    std::vector<float> GetDefaultWholeBodyEffortLimits() const;
+    std::vector<float> GetDefaultWholeBodyKpLimits() const;
+    std::vector<float> GetDefaultWholeBodyKdLimits() const;
+    std::vector<float> GetDefaultArmLowerLimits() const;
+    std::vector<float> GetDefaultArmUpperLimits() const;
+    bool ClipWholeBodyCommand(RobotCommand<float> *command, const char* context) const;
+    bool ClipArmPoseTargetInPlace(std::vector<float>& target,
+                                  const std::vector<float>& fallback,
+                                  const char* context) const;
+    bool ClipArmBridgeCommandInPlace(std::vector<float>& q,
+                                     std::vector<float>& dq,
+                                     std::vector<float>& kp,
+                                     std::vector<float>& kd,
+                                     std::vector<float>& tau,
+                                     const std::vector<float>& q_fallback,
+                                     const char* context) const;
+    bool ValidateArmPoseTarget(const std::vector<float>& target, const char* context) const;
+    bool ValidateArmBridgeStateSample(const std::vector<float>& q,
+                                      const std::vector<float>& dq,
+                                      const std::vector<float>& tau,
+                                      const char* context) const;
     void ReadArmStateFromExternal(RobotState<float> *state);
     void WriteArmCommandToExternal(const RobotCommand<float> *command);
     void ApplyArmHold(const std::vector<float>& target, const char* reason);
@@ -147,6 +176,8 @@ private:
                               const std::vector<float>& kp,
                               const std::vector<float>& kd);
     void MaybePublishKey1CmdVel();
+    void RecordPolicyInferenceTick();
+    void HandleLoopException(const std::string& loop_name, const std::string& error);
 
     // others
     std::vector<float> mapped_joint_positions;
@@ -177,7 +208,10 @@ private:
     bool arm_split_control_enabled = false;
     bool arm_bridge_state_valid = false;
     bool arm_bridge_require_state = true;
+    bool arm_bridge_require_live_state = true;
     bool arm_bridge_state_timeout_warned = false;
+    bool arm_bridge_shadow_mode_warned = false;
+    bool arm_bridge_state_from_backend = false;
     float arm_bridge_state_timeout_sec = 0.25f;
     std::string arm_bridge_cmd_topic = "/arx_x5/joint_cmd";
     std::string arm_bridge_state_topic = "/arx_x5/joint_state";
@@ -188,9 +222,27 @@ private:
     std::vector<float> arm_external_shadow_dq;
     std::chrono::steady_clock::time_point arm_bridge_state_stamp;
     bool arm_bridge_state_stream_logged = false;
+    bool arm_non_rl_guard_warned = false;
     float joystick_deadband = 0.05f;
     bool safe_shutdown_done = false;
+    std::atomic<bool> arm_safe_shutdown_active{false};
+    bool real_deploy_exclusive_keyboard_control = true;
+    bool cmd_vel_input_ignored_warned = false;
+    bool policy_inference_log_enabled = true;
+    float last_policy_inference_hz = 0.0f;
+    std::chrono::steady_clock::time_point last_policy_inference_stamp{};
+    std::atomic<bool> loop_exception_requested{false};
     std::mutex safe_shutdown_mutex;
+    std::mutex loop_exception_mutex;
+    std::string loop_exception_message;
+    std::vector<float> whole_body_joint_lower_limits;
+    std::vector<float> whole_body_joint_upper_limits;
+    std::vector<float> whole_body_velocity_limits;
+    std::vector<float> whole_body_effort_limits;
+    std::vector<float> whole_body_kp_limits;
+    std::vector<float> whole_body_kd_limits;
+    std::vector<float> arm_joint_lower_limits;
+    std::vector<float> arm_joint_upper_limits;
 
     std::mutex cmd_vel_mutex;
     std::mutex arm_command_mutex;

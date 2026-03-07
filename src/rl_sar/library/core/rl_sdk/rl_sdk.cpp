@@ -8,6 +8,10 @@
 
 void RL::StateController(const RobotState<float>* state, RobotCommand<float>* command)
 {
+    const bool exclusive_go2_x5_control =
+        (this->robot_name == "go2_x5") &&
+        this->params.Get<bool>("real_deploy_exclusive_keyboard_control", false);
+
     auto updateState = [&](std::shared_ptr<FSMState> statePtr)
     {
         if (auto rl_fsm_state = std::dynamic_pointer_cast<RLFSMState>(statePtr))
@@ -31,57 +35,72 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
                             this->fsm.current_state_->GetStateName().find("RLLocomotion") != std::string::npos);
         if (in_rl && this->control.last_keyboard != Input::Keyboard::Num1)
         {
-            const bool key1_prefer_navigation_mode =
-                this->params.Get<bool>("key1_prefer_navigation_mode", false);
-            const auto key1_mode =
-                Go2X5ControlLogic::ResolveKey1Mode(key1_prefer_navigation_mode);
-            if (key1_mode == Go2X5ControlLogic::Key1Mode::Navigation)
+            if (exclusive_go2_x5_control)
             {
-                this->control.navigation_mode = true;
-                this->control.x = 0.0f;
-                this->control.y = 0.0f;
-                this->control.yaw = 0.0f;
+                this->control.navigation_mode = false;
+                this->control.x = this->params.Get<float>("fixed_cmd_x", 0.0f);
+                this->control.y = this->params.Get<float>("fixed_cmd_y", 0.0f);
+                this->control.yaw = this->params.Get<float>("fixed_cmd_yaw", 0.0f);
                 std::cout << std::endl << LOGGER::INFO
-                          << "Key[1] pressed: navigation mode ON (/cmd_vel enabled)" << std::endl;
+                          << "Key[1] pressed: RL policy mode ON (exclusive real deploy control)"
+                          << " x=" << this->control.x
+                          << " y=" << this->control.y
+                          << " yaw=" << this->control.yaw << std::endl;
             }
             else
             {
-                this->control.x = this->params.Get<float>("fixed_cmd_x", 0.6f);
-                this->control.y = this->params.Get<float>("fixed_cmd_y", 0.0f);
-                this->control.yaw = this->params.Get<float>("fixed_cmd_yaw", 0.0f);
-                this->control.navigation_mode = false;
-                std::cout << std::endl << LOGGER::INFO << "Key[1] pressed: fixed cmd x=" << this->control.x
-                          << " y=" << this->control.y << " yaw=" << this->control.yaw << std::endl;
+                const bool key1_prefer_navigation_mode =
+                    this->params.Get<bool>("key1_prefer_navigation_mode", false);
+                const auto key1_mode =
+                    Go2X5ControlLogic::ResolveKey1Mode(key1_prefer_navigation_mode);
+                if (key1_mode == Go2X5ControlLogic::Key1Mode::Navigation)
+                {
+                    this->control.navigation_mode = true;
+                    this->control.x = 0.0f;
+                    this->control.y = 0.0f;
+                    this->control.yaw = 0.0f;
+                    std::cout << std::endl << LOGGER::INFO
+                              << "Key[1] pressed: navigation mode ON (/cmd_vel enabled)" << std::endl;
+                }
+                else
+                {
+                    this->control.x = this->params.Get<float>("fixed_cmd_x", 0.6f);
+                    this->control.y = this->params.Get<float>("fixed_cmd_y", 0.0f);
+                    this->control.yaw = this->params.Get<float>("fixed_cmd_yaw", 0.0f);
+                    this->control.navigation_mode = false;
+                    std::cout << std::endl << LOGGER::INFO << "Key[1] pressed: fixed cmd x=" << this->control.x
+                              << " y=" << this->control.y << " yaw=" << this->control.yaw << std::endl;
+                }
             }
             this->control.last_keyboard = Input::Keyboard::Num1;
         }
     }
 
-    if (this->control.current_keyboard == Input::Keyboard::W)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::W)
     {
         this->control.x += 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::S)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::S)
     {
         this->control.x -= 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::A)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::A)
     {
         this->control.y += 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::D)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::D)
     {
         this->control.y -= 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::Q)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::Q)
     {
         this->control.yaw += 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::E)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::E)
     {
         this->control.yaw -= 0.1f;
     }
-    if (this->control.current_keyboard == Input::Keyboard::Space)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::Space)
     {
         this->control.x = 0.0f;
         this->control.y = 0.0f;
@@ -89,7 +108,7 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
         // Allow fixed-command (Key[1]) to be re-triggered after stop.
         this->control.last_keyboard = Input::Keyboard::Space;
     }
-    if (this->control.current_keyboard == Input::Keyboard::Num5)
+    if (!exclusive_go2_x5_control && this->control.current_keyboard == Input::Keyboard::Num5)
     {
         this->control.x = 0.0f;
         this->control.y = 0.0f;
@@ -100,8 +119,10 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
             this->control.last_keyboard = Input::Keyboard::Num5;
         }
     }
-    const bool nav_keyboard_down = (this->control.current_keyboard == Input::Keyboard::N);
-    const bool nav_gamepad_down = (this->control.current_gamepad == Input::Gamepad::X);
+    const bool nav_keyboard_down = !exclusive_go2_x5_control &&
+                                   (this->control.current_keyboard == Input::Keyboard::N);
+    const bool nav_gamepad_down = !exclusive_go2_x5_control &&
+                                  (this->control.current_gamepad == Input::Gamepad::X);
     const bool nav_toggle_requested =
         (nav_keyboard_down && !this->control.nav_keyboard_latched) ||
         (nav_gamepad_down && !this->control.nav_gamepad_latched);
@@ -112,6 +133,10 @@ void RL::StateController(const RobotState<float>* state, RobotCommand<float>* co
     }
     this->control.nav_keyboard_latched = nav_keyboard_down;
     this->control.nav_gamepad_latched = nav_gamepad_down;
+    if (exclusive_go2_x5_control)
+    {
+        this->control.navigation_mode = false;
+    }
 }
 
 std::vector<float> RL::ComputeObservation()

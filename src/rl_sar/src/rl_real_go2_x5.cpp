@@ -9,6 +9,8 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 
@@ -22,6 +24,7 @@ RL_Real_Go2X5::RL_Real_Go2X5(int argc, char **argv)
     this->ReadYaml(this->robot_name, "base.yaml");
     this->InitializeArmCommandState();
     this->InitializeArmChannelConfig();
+    this->InitializeRealDeploySafetyConfig();
     this->ValidateJointMappingOrThrow("base.yaml");
     std::cout << LOGGER::INFO << "[Boot] base.yaml loaded and arm config validated" << std::endl;
 
@@ -117,9 +120,20 @@ RL_Real_Go2X5::RL_Real_Go2X5(int argc, char **argv)
 
     // loop
     std::cout << LOGGER::INFO << "[Boot] Starting control loops" << std::endl;
-    this->loop_keyboard = std::make_shared<LoopFunc>("loop_keyboard", 0.05, std::bind(&RL_Real_Go2X5::KeyboardInterface, this));
-    this->loop_control = std::make_shared<LoopFunc>("loop_control", this->params.Get<float>("dt"), std::bind(&RL_Real_Go2X5::RobotControl, this));
-    this->loop_rl = std::make_shared<LoopFunc>("loop_rl", this->params.Get<float>("dt") * this->params.Get<int>("decimation"), std::bind(&RL_Real_Go2X5::RunModel, this));
+    auto loop_exception_handler = [this](const std::string& loop_name, const std::string& error)
+    {
+        this->HandleLoopException(loop_name, error);
+    };
+    this->loop_keyboard = std::make_shared<LoopFunc>(
+        "loop_keyboard", 0.05, std::bind(&RL_Real_Go2X5::KeyboardInterface, this), -1, loop_exception_handler);
+    this->loop_control = std::make_shared<LoopFunc>(
+        "loop_control", this->params.Get<float>("dt"), std::bind(&RL_Real_Go2X5::RobotControl, this), -1, loop_exception_handler);
+    this->loop_rl = std::make_shared<LoopFunc>(
+        "loop_rl",
+        this->params.Get<float>("dt") * this->params.Get<int>("decimation"),
+        std::bind(&RL_Real_Go2X5::RunModel, this),
+        -1,
+        loop_exception_handler);
     this->loop_keyboard->start();
     this->loop_control->start();
     this->loop_rl->start();
@@ -131,7 +145,8 @@ RL_Real_Go2X5::RL_Real_Go2X5(int argc, char **argv)
     this->plot_target_joint_pos.resize(this->params.Get<int>("num_of_dofs"));
     for (auto &vector : this->plot_real_joint_pos) { vector = std::vector<float>(this->plot_size, 0); }
     for (auto &vector : this->plot_target_joint_pos) { vector = std::vector<float>(this->plot_size, 0); }
-    this->loop_plot = std::make_shared<LoopFunc>("loop_plot", 0.002, std::bind(&RL_Real_Go2X5::Plot, this));
+    this->loop_plot = std::make_shared<LoopFunc>(
+        "loop_plot", 0.002, std::bind(&RL_Real_Go2X5::Plot, this), -1, loop_exception_handler);
     this->loop_plot->start();
 #endif
 #ifdef CSV_LOGGER
@@ -180,6 +195,7 @@ void RL_Real_Go2X5::SafeShutdownNow()
 
     try
     {
+        this->arm_safe_shutdown_active.store(true);
         this->ExecuteSafeShutdownSequence();
     }
     catch (const std::exception& e)
@@ -190,6 +206,8 @@ void RL_Real_Go2X5::SafeShutdownNow()
     {
         std::cout << LOGGER::WARNING << "Safe shutdown sequence failed with unknown error." << std::endl;
     }
+    this->arm_safe_shutdown_active.store(false);
+    this->safe_shutdown_done = true;
 }
 
 std::vector<float> RL_Real_Go2X5::BuildSafeShutdownTargetPose(const std::vector<float>& default_pos) const
@@ -268,6 +286,8 @@ void RL_Real_Go2X5::PublishWholeBodyPose(const std::vector<float>& pose,
         command_local.motor_command.kd[static_cast<size_t>(i)] =
             (i < static_cast<int>(kd.size())) ? kd[static_cast<size_t>(i)] : 3.0f;
     }
+
+    this->ClipWholeBodyCommand(&command_local, "Whole-body pose publish");
 
     for (int i = 0; i < num_dofs; ++i)
     {
@@ -473,6 +493,84 @@ void RL_Real_Go2X5::InitializeArmCommandState()
     this->arm_command_initialized = true;
 }
 
+void RL_Real_Go2X5::InitializeRealDeploySafetyConfig()
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    this->real_deploy_exclusive_keyboard_control =
+        this->params.Get<bool>("real_deploy_exclusive_keyboard_control", true);
+    this->policy_inference_log_enabled =
+        this->params.Get<bool>("policy_inference_log_enabled", true);
+    this->cmd_vel_input_ignored_warned = false;
+    this->last_policy_inference_hz = 0.0f;
+    this->last_policy_inference_stamp = std::chrono::steady_clock::time_point{};
+
+    auto lower_limits = this->params.Get<std::vector<float>>("joint_lower_limits", {});
+    if (lower_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        lower_limits = this->GetDefaultWholeBodyLowerLimits();
+    }
+    if (lower_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        lower_limits.assign(static_cast<size_t>(num_dofs), -std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_joint_lower_limits = std::move(lower_limits);
+
+    auto upper_limits = this->params.Get<std::vector<float>>("joint_upper_limits", {});
+    if (upper_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        upper_limits = this->GetDefaultWholeBodyUpperLimits();
+    }
+    if (upper_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        upper_limits.assign(static_cast<size_t>(num_dofs), std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_joint_upper_limits = std::move(upper_limits);
+
+    auto velocity_limits = this->params.Get<std::vector<float>>("joint_velocity_limits", {});
+    if (velocity_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        velocity_limits = this->GetDefaultWholeBodyVelocityLimits();
+    }
+    if (velocity_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        velocity_limits.assign(static_cast<size_t>(num_dofs), std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_velocity_limits = std::move(velocity_limits);
+
+    auto effort_limits = this->params.Get<std::vector<float>>("joint_effort_limits", {});
+    if (effort_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        effort_limits = this->GetDefaultWholeBodyEffortLimits();
+    }
+    if (effort_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        effort_limits.assign(static_cast<size_t>(num_dofs), std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_effort_limits = std::move(effort_limits);
+
+    auto kp_limits = this->params.Get<std::vector<float>>("joint_kp_limits", {});
+    if (kp_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        kp_limits = this->GetDefaultWholeBodyKpLimits();
+    }
+    if (kp_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        kp_limits.assign(static_cast<size_t>(num_dofs), std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_kp_limits = std::move(kp_limits);
+
+    auto kd_limits = this->params.Get<std::vector<float>>("joint_kd_limits", {});
+    if (kd_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        kd_limits = this->GetDefaultWholeBodyKdLimits();
+    }
+    if (kd_limits.size() != static_cast<size_t>(num_dofs))
+    {
+        kd_limits.assign(static_cast<size_t>(num_dofs), std::numeric_limits<float>::infinity());
+    }
+    this->whole_body_kd_limits = std::move(kd_limits);
+}
+
 void RL_Real_Go2X5::InitializeArmChannelConfig()
 {
     const int num_dofs = this->params.Get<int>("num_of_dofs");
@@ -514,12 +612,15 @@ void RL_Real_Go2X5::InitializeArmChannelConfig()
     this->arm_bridge_cmd_topic = this->params.Get<std::string>("arm_bridge_cmd_topic", "/arx_x5/joint_cmd");
     this->arm_bridge_state_topic = this->params.Get<std::string>("arm_bridge_state_topic", "/arx_x5/joint_state");
     this->arm_bridge_require_state = this->params.Get<bool>("arm_bridge_require_state", this->arm_split_control_enabled);
+    this->arm_bridge_require_live_state =
+        this->params.Get<bool>("arm_bridge_require_live_state", this->arm_bridge_require_state);
     this->arm_bridge_state_timeout_sec = this->params.Get<float>("arm_bridge_state_timeout_sec", 0.25f);
     if (this->arm_bridge_state_timeout_sec < 0.0f)
     {
         this->arm_bridge_state_timeout_sec = 0.0f;
     }
     this->arm_bridge_state_timeout_warned = false;
+    this->arm_bridge_shadow_mode_warned = false;
 
     if (this->arm_external_state_q.size() != static_cast<size_t>(this->arm_joint_count))
     {
@@ -527,6 +628,7 @@ void RL_Real_Go2X5::InitializeArmChannelConfig()
         this->arm_external_state_dq.assign(static_cast<size_t>(this->arm_joint_count), 0.0f);
         this->arm_external_state_tau.assign(static_cast<size_t>(this->arm_joint_count), 0.0f);
         this->arm_bridge_state_valid = false;
+        this->arm_bridge_state_from_backend = false;
     }
     if (this->arm_external_shadow_q.size() != static_cast<size_t>(this->arm_joint_count))
     {
@@ -543,6 +645,28 @@ void RL_Real_Go2X5::InitializeArmChannelConfig()
         }
     }
 
+    auto lower_limits = this->params.Get<std::vector<float>>("arm_joint_lower_limits", {});
+    if (lower_limits.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        lower_limits = this->GetDefaultArmLowerLimits();
+    }
+    if (lower_limits.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        lower_limits.assign(static_cast<size_t>(this->arm_joint_count), -std::numeric_limits<float>::infinity());
+    }
+    this->arm_joint_lower_limits = std::move(lower_limits);
+
+    auto upper_limits = this->params.Get<std::vector<float>>("arm_joint_upper_limits", {});
+    if (upper_limits.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        upper_limits = this->GetDefaultArmUpperLimits();
+    }
+    if (upper_limits.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        upper_limits.assign(static_cast<size_t>(this->arm_joint_count), std::numeric_limits<float>::infinity());
+    }
+    this->arm_joint_upper_limits = std::move(upper_limits);
+
     std::cout << LOGGER::INFO << "Arm control mode: " << this->arm_control_mode
               << " (start=" << this->arm_joint_start_index
               << ", count=" << this->arm_joint_count << ")" << std::endl;
@@ -550,8 +674,378 @@ void RL_Real_Go2X5::InitializeArmChannelConfig()
     {
         std::cout << LOGGER::INFO << "Arm bridge guard: require_state="
                   << (this->arm_bridge_require_state ? "true" : "false")
+                  << ", require_live_state=" << (this->arm_bridge_require_live_state ? "true" : "false")
                   << ", timeout=" << this->arm_bridge_state_timeout_sec << "s" << std::endl;
     }
+}
+
+bool RL_Real_Go2X5::UseExclusiveRealDeployControl() const
+{
+    return this->real_deploy_exclusive_keyboard_control;
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyLowerLimits() const
+{
+    if (this->params.Get<int>("num_of_dofs") == 18)
+    {
+        return {
+            -1.0472f, -1.5708f, -2.7227f,
+            -1.0472f, -1.5708f, -2.7227f,
+            -1.0472f, -0.5236f, -2.7227f,
+            -1.0472f, -0.5236f, -2.7227f,
+            -3.14f, -0.05f, -0.1f,
+            -1.6f, -1.57f, -2.0f
+        };
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs"))),
+                              -std::numeric_limits<float>::infinity());
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyUpperLimits() const
+{
+    if (this->params.Get<int>("num_of_dofs") == 18)
+    {
+        return {
+            1.0472f, 3.4907f, -0.83776f,
+            1.0472f, 3.4907f, -0.83776f,
+            1.0472f, 4.5379f, -0.83776f,
+            1.0472f, 4.5379f, -0.83776f,
+            2.618f, 3.50f, 3.20f,
+            1.55f, 1.57f, 2.0f
+        };
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs"))),
+                              std::numeric_limits<float>::infinity());
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyVelocityLimits() const
+{
+    if (this->params.Get<int>("num_of_dofs") == 18)
+    {
+        return {
+            30.1f, 30.1f, 15.7f,
+            30.1f, 30.1f, 15.7f,
+            30.1f, 30.1f, 15.7f,
+            30.1f, 30.1f, 15.7f,
+            3.0f, 3.0f, 3.0f,
+            3.0f, 3.0f, 3.0f
+        };
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs"))),
+                              std::numeric_limits<float>::infinity());
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyEffortLimits() const
+{
+    auto torque_limits = this->params.Get<std::vector<float>>("torque_limits", {});
+    if (torque_limits.size() == static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs"))))
+    {
+        return torque_limits;
+    }
+    if (this->params.Get<int>("num_of_dofs") == 18)
+    {
+        return {
+            23.7f, 23.7f, 45.43f,
+            23.7f, 23.7f, 45.43f,
+            23.7f, 23.7f, 45.43f,
+            23.7f, 23.7f, 45.43f,
+            15.0f, 15.0f, 15.0f,
+            3.0f, 3.0f, 3.0f
+        };
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs"))),
+                              std::numeric_limits<float>::infinity());
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyKpLimits() const
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    std::vector<float> limits(static_cast<size_t>(std::max(0, num_dofs)), 0.0f);
+    const auto fixed_kp = this->params.Get<std::vector<float>>("fixed_kp", {});
+    const auto rl_kp = this->params.Get<std::vector<float>>("rl_kp", {});
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        float value = 0.0f;
+        if (i < static_cast<int>(fixed_kp.size()))
+        {
+            value = std::max(value, std::fabs(fixed_kp[static_cast<size_t>(i)]));
+        }
+        if (i < static_cast<int>(rl_kp.size()))
+        {
+            value = std::max(value, std::fabs(rl_kp[static_cast<size_t>(i)]));
+        }
+        limits[static_cast<size_t>(i)] = std::max(1.0f, value);
+    }
+    return limits;
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultWholeBodyKdLimits() const
+{
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    std::vector<float> limits(static_cast<size_t>(std::max(0, num_dofs)), 0.0f);
+    const auto fixed_kd = this->params.Get<std::vector<float>>("fixed_kd", {});
+    const auto rl_kd = this->params.Get<std::vector<float>>("rl_kd", {});
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        float value = 0.0f;
+        if (i < static_cast<int>(fixed_kd.size()))
+        {
+            value = std::max(value, std::fabs(fixed_kd[static_cast<size_t>(i)]));
+        }
+        if (i < static_cast<int>(rl_kd.size()))
+        {
+            value = std::max(value, std::fabs(rl_kd[static_cast<size_t>(i)]));
+        }
+        limits[static_cast<size_t>(i)] = std::max(1.0f, value);
+    }
+    return limits;
+}
+
+bool RL_Real_Go2X5::ClipWholeBodyCommand(RobotCommand<float> *command, const char* context) const
+{
+    if (!command)
+    {
+        return false;
+    }
+
+    const int num_dofs = this->params.Get<int>("num_of_dofs");
+    if (num_dofs <= 0)
+    {
+        return false;
+    }
+
+    const auto default_pos = this->params.Get<std::vector<float>>("default_dof_pos", {});
+    const auto fixed_kp = this->params.Get<std::vector<float>>("fixed_kp", {});
+    const auto fixed_kd = this->params.Get<std::vector<float>>("fixed_kd", {});
+    const auto joint_names = this->params.Get<std::vector<std::string>>("joint_names", {});
+
+    int clipped_count = 0;
+    std::string first_joint;
+    for (int i = 0; i < num_dofs; ++i)
+    {
+        const float q_fallback =
+            (i < static_cast<int>(default_pos.size())) ? default_pos[static_cast<size_t>(i)] : 0.0f;
+        const float dq_fallback = 0.0f;
+        const float kp_fallback =
+            (i < static_cast<int>(fixed_kp.size())) ? fixed_kp[static_cast<size_t>(i)] : 0.0f;
+        const float kd_fallback =
+            (i < static_cast<int>(fixed_kd.size())) ? fixed_kd[static_cast<size_t>(i)] : 0.0f;
+        const float q_lo =
+            (i < static_cast<int>(this->whole_body_joint_lower_limits.size()))
+                ? this->whole_body_joint_lower_limits[static_cast<size_t>(i)]
+                : -std::numeric_limits<float>::infinity();
+        const float q_hi =
+            (i < static_cast<int>(this->whole_body_joint_upper_limits.size()))
+                ? this->whole_body_joint_upper_limits[static_cast<size_t>(i)]
+                : std::numeric_limits<float>::infinity();
+        const float dq_limit =
+            (i < static_cast<int>(this->whole_body_velocity_limits.size()))
+                ? this->whole_body_velocity_limits[static_cast<size_t>(i)]
+                : std::numeric_limits<float>::infinity();
+        const float tau_limit =
+            (i < static_cast<int>(this->whole_body_effort_limits.size()))
+                ? this->whole_body_effort_limits[static_cast<size_t>(i)]
+                : std::numeric_limits<float>::infinity();
+        const float kp_limit =
+            (i < static_cast<int>(this->whole_body_kp_limits.size()))
+                ? this->whole_body_kp_limits[static_cast<size_t>(i)]
+                : std::numeric_limits<float>::infinity();
+        const float kd_limit =
+            (i < static_cast<int>(this->whole_body_kd_limits.size()))
+                ? this->whole_body_kd_limits[static_cast<size_t>(i)]
+                : std::numeric_limits<float>::infinity();
+
+        auto clip_position = [&](float value) -> float
+        {
+            float sanitized = std::isfinite(value) ? value : q_fallback;
+            if (std::isfinite(q_lo) && std::isfinite(q_hi))
+            {
+                const float lo = std::min(q_lo, q_hi);
+                const float hi = std::max(q_lo, q_hi);
+                sanitized = std::clamp(sanitized, lo, hi);
+            }
+            return sanitized;
+        };
+        auto clip_abs = [](float value, float fallback, float abs_limit, bool non_negative) -> float
+        {
+            float sanitized = std::isfinite(value) ? value : fallback;
+            if (std::isfinite(abs_limit))
+            {
+                const float lo = non_negative ? 0.0f : -std::fabs(abs_limit);
+                const float hi = std::fabs(abs_limit);
+                sanitized = std::clamp(sanitized, lo, hi);
+            }
+            return sanitized;
+        };
+
+        const float old_q = command->motor_command.q[static_cast<size_t>(i)];
+        const float old_dq = command->motor_command.dq[static_cast<size_t>(i)];
+        const float old_tau = command->motor_command.tau[static_cast<size_t>(i)];
+        const float old_kp = command->motor_command.kp[static_cast<size_t>(i)];
+        const float old_kd = command->motor_command.kd[static_cast<size_t>(i)];
+
+        command->motor_command.q[static_cast<size_t>(i)] = clip_position(old_q);
+        command->motor_command.dq[static_cast<size_t>(i)] = clip_abs(old_dq, dq_fallback, dq_limit, false);
+        command->motor_command.tau[static_cast<size_t>(i)] = clip_abs(old_tau, 0.0f, tau_limit, false);
+        command->motor_command.kp[static_cast<size_t>(i)] = clip_abs(old_kp, kp_fallback, kp_limit, true);
+        command->motor_command.kd[static_cast<size_t>(i)] = clip_abs(old_kd, kd_fallback, kd_limit, true);
+
+        const bool joint_clipped =
+            !std::isfinite(old_q) || !std::isfinite(old_dq) || !std::isfinite(old_tau) ||
+            !std::isfinite(old_kp) || !std::isfinite(old_kd) ||
+            std::fabs(command->motor_command.q[static_cast<size_t>(i)] - old_q) > 1e-6f ||
+            std::fabs(command->motor_command.dq[static_cast<size_t>(i)] - old_dq) > 1e-6f ||
+            std::fabs(command->motor_command.tau[static_cast<size_t>(i)] - old_tau) > 1e-6f ||
+            std::fabs(command->motor_command.kp[static_cast<size_t>(i)] - old_kp) > 1e-6f ||
+            std::fabs(command->motor_command.kd[static_cast<size_t>(i)] - old_kd) > 1e-6f;
+        if (joint_clipped)
+        {
+            ++clipped_count;
+            if (first_joint.empty())
+            {
+                first_joint = (i < static_cast<int>(joint_names.size())) ? joint_names[static_cast<size_t>(i)]
+                                                                         : std::to_string(i);
+            }
+        }
+    }
+
+    if (clipped_count > 0)
+    {
+        std::cout << LOGGER::WARNING << context << " clipped " << clipped_count
+                  << " joint command(s), first=" << first_joint << std::endl;
+        return true;
+    }
+    return false;
+}
+
+bool RL_Real_Go2X5::ClipArmPoseTargetInPlace(
+    std::vector<float>& target,
+    const std::vector<float>& fallback,
+    const char* context) const
+{
+    if (target.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        std::cout << LOGGER::WARNING << context << " rejected: expect "
+                  << this->arm_joint_count << " values, got " << target.size() << std::endl;
+        return false;
+    }
+
+    bool clipped = false;
+    for (size_t i = 0; i < target.size(); ++i)
+    {
+        float value = target[i];
+        const float fallback_value =
+            (i < fallback.size()) ? fallback[i] : ((i < this->arm_joint_lower_limits.size() &&
+                                                    i < this->arm_joint_upper_limits.size())
+                                                       ? std::clamp(0.0f,
+                                                                    std::min(this->arm_joint_lower_limits[i],
+                                                                             this->arm_joint_upper_limits[i]),
+                                                                    std::max(this->arm_joint_lower_limits[i],
+                                                                             this->arm_joint_upper_limits[i]))
+                                                       : 0.0f);
+        if (!std::isfinite(value))
+        {
+            value = fallback_value;
+            clipped = true;
+        }
+        if (i < this->arm_joint_lower_limits.size() && i < this->arm_joint_upper_limits.size())
+        {
+            const float lo = std::min(this->arm_joint_lower_limits[i], this->arm_joint_upper_limits[i]);
+            const float hi = std::max(this->arm_joint_lower_limits[i], this->arm_joint_upper_limits[i]);
+            const float clamped = std::clamp(value, lo, hi);
+            if (std::fabs(clamped - value) > 1e-6f)
+            {
+                clipped = true;
+            }
+            value = clamped;
+        }
+        target[i] = value;
+    }
+
+    if (clipped)
+    {
+        std::cout << LOGGER::WARNING << context << " clipped to arm joint limits." << std::endl;
+    }
+    return true;
+}
+
+bool RL_Real_Go2X5::ClipArmBridgeCommandInPlace(
+    std::vector<float>& q,
+    std::vector<float>& dq,
+    std::vector<float>& kp,
+    std::vector<float>& kd,
+    std::vector<float>& tau,
+    const std::vector<float>& q_fallback,
+    const char* context) const
+{
+    if (q.size() != static_cast<size_t>(this->arm_joint_count) ||
+        dq.size() != static_cast<size_t>(this->arm_joint_count) ||
+        kp.size() != static_cast<size_t>(this->arm_joint_count) ||
+        kd.size() != static_cast<size_t>(this->arm_joint_count) ||
+        tau.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        std::cout << LOGGER::WARNING << context << " rejected: arm bridge command size mismatch" << std::endl;
+        return false;
+    }
+
+    if (!this->ClipArmPoseTargetInPlace(q, q_fallback, context))
+    {
+        return false;
+    }
+
+    bool clipped = false;
+    for (int i = 0; i < this->arm_joint_count; ++i)
+    {
+        const int idx = this->arm_joint_start_index + i;
+        const float dq_limit =
+            (idx >= 0 && idx < static_cast<int>(this->whole_body_velocity_limits.size()))
+                ? this->whole_body_velocity_limits[static_cast<size_t>(idx)]
+                : 3.0f;
+        const float kp_limit =
+            (idx >= 0 && idx < static_cast<int>(this->whole_body_kp_limits.size()))
+                ? this->whole_body_kp_limits[static_cast<size_t>(idx)]
+                : 100.0f;
+        const float kd_limit =
+            (idx >= 0 && idx < static_cast<int>(this->whole_body_kd_limits.size()))
+                ? this->whole_body_kd_limits[static_cast<size_t>(idx)]
+                : 20.0f;
+        const float tau_limit =
+            (idx >= 0 && idx < static_cast<int>(this->whole_body_effort_limits.size()))
+                ? this->whole_body_effort_limits[static_cast<size_t>(idx)]
+                : 15.0f;
+
+        auto clip_abs = [&](float value, float fallback, float abs_limit, bool non_negative) -> float
+        {
+            float sanitized = std::isfinite(value) ? value : fallback;
+            if (std::isfinite(abs_limit))
+            {
+                const float lo = non_negative ? 0.0f : -std::fabs(abs_limit);
+                const float hi = std::fabs(abs_limit);
+                const float clamped = std::clamp(sanitized, lo, hi);
+                if (std::fabs(clamped - sanitized) > 1e-6f || !std::isfinite(value))
+                {
+                    clipped = true;
+                }
+                return clamped;
+            }
+            if (!std::isfinite(value))
+            {
+                clipped = true;
+            }
+            return sanitized;
+        };
+
+        dq[static_cast<size_t>(i)] = clip_abs(dq[static_cast<size_t>(i)], 0.0f, dq_limit, false);
+        kp[static_cast<size_t>(i)] = clip_abs(kp[static_cast<size_t>(i)], 0.0f, kp_limit, true);
+        kd[static_cast<size_t>(i)] = clip_abs(kd[static_cast<size_t>(i)], 0.0f, kd_limit, true);
+        tau[static_cast<size_t>(i)] = clip_abs(tau[static_cast<size_t>(i)], 0.0f, tau_limit, false);
+    }
+
+    if (clipped)
+    {
+        std::cout << LOGGER::WARNING << context << " clipped to real arm deploy limits." << std::endl;
+    }
+    return true;
 }
 
 void RL_Real_Go2X5::ValidateJointMappingOrThrow(const char* stage) const
@@ -605,6 +1099,11 @@ void RL_Real_Go2X5::ValidateJointMappingOrThrow(const char* stage) const
 bool RL_Real_Go2X5::IsArmBridgeStateFreshLocked() const
 {
     if (!this->arm_bridge_state_valid)
+    {
+        return false;
+    }
+
+    if (this->arm_bridge_require_live_state && !this->arm_bridge_state_from_backend)
     {
         return false;
     }
@@ -704,6 +1203,110 @@ bool RL_Real_Go2X5::IsArmJointIndex(int idx) const
            idx < (this->arm_joint_start_index + this->arm_joint_count);
 }
 
+bool RL_Real_Go2X5::IsInRLLocomotionState() const
+{
+    return this->fsm.current_state_ &&
+           this->fsm.current_state_->GetStateName().find("RLLocomotion") != std::string::npos;
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultArmLowerLimits() const
+{
+    if (this->arm_joint_count == 6)
+    {
+        return {-3.14f, -0.05f, -0.1f, -1.6f, -1.57f, -2.0f};
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->arm_joint_count)),
+                              -std::numeric_limits<float>::infinity());
+}
+
+std::vector<float> RL_Real_Go2X5::GetDefaultArmUpperLimits() const
+{
+    if (this->arm_joint_count == 6)
+    {
+        return {2.618f, 3.50f, 3.20f, 1.55f, 1.57f, 2.0f};
+    }
+    return std::vector<float>(static_cast<size_t>(std::max(0, this->arm_joint_count)),
+                              std::numeric_limits<float>::infinity());
+}
+
+bool RL_Real_Go2X5::ValidateArmPoseTarget(const std::vector<float>& target, const char* context) const
+{
+    if (target.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        std::cout << LOGGER::WARNING << context << " rejected: expect "
+                  << this->arm_joint_count << " values, got " << target.size() << std::endl;
+        return false;
+    }
+
+    for (size_t i = 0; i < target.size(); ++i)
+    {
+        const float value = target[i];
+        if (!std::isfinite(value))
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: non-finite joint["
+                      << i << "]=" << value << std::endl;
+            return false;
+        }
+        if (i < this->arm_joint_lower_limits.size() && value < this->arm_joint_lower_limits[i])
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: joint[" << i
+                      << "]=" << value << " below lower limit "
+                      << this->arm_joint_lower_limits[i] << std::endl;
+            return false;
+        }
+        if (i < this->arm_joint_upper_limits.size() && value > this->arm_joint_upper_limits[i])
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: joint[" << i
+                      << "]=" << value << " above upper limit "
+                      << this->arm_joint_upper_limits[i] << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool RL_Real_Go2X5::ValidateArmBridgeStateSample(const std::vector<float>& q,
+                                                 const std::vector<float>& dq,
+                                                 const std::vector<float>& tau,
+                                                 const char* context) const
+{
+    if (q.size() != static_cast<size_t>(this->arm_joint_count) ||
+        dq.size() != static_cast<size_t>(this->arm_joint_count) ||
+        tau.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        std::cout << LOGGER::WARNING << context << " rejected: state size mismatch" << std::endl;
+        return false;
+    }
+
+    constexpr float kStateMargin = 0.35f;
+    for (size_t i = 0; i < q.size(); ++i)
+    {
+        if (!std::isfinite(q[i]) || !std::isfinite(dq[i]) || !std::isfinite(tau[i]))
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: non-finite state sample at joint "
+                      << i << std::endl;
+            return false;
+        }
+        if (i < this->arm_joint_lower_limits.size() &&
+            q[i] < (this->arm_joint_lower_limits[i] - kStateMargin))
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: joint[" << i
+                      << "]=" << q[i] << " below plausible state lower bound "
+                      << (this->arm_joint_lower_limits[i] - kStateMargin) << std::endl;
+            return false;
+        }
+        if (i < this->arm_joint_upper_limits.size() &&
+            q[i] > (this->arm_joint_upper_limits[i] + kStateMargin))
+        {
+            std::cout << LOGGER::WARNING << context << " rejected: joint[" << i
+                      << "]=" << q[i] << " above plausible state upper bound "
+                      << (this->arm_joint_upper_limits[i] + kStateMargin) << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
 void RL_Real_Go2X5::ReadArmStateFromExternal(RobotState<float> *state)
 {
     if (!this->arm_split_control_enabled || this->arm_joint_count <= 0)
@@ -715,18 +1318,34 @@ void RL_Real_Go2X5::ReadArmStateFromExternal(RobotState<float> *state)
     const bool bridge_state_fresh = this->IsArmBridgeStateFreshLocked();
     const bool use_bridge_state = bridge_state_fresh &&
                                   this->arm_external_state_q.size() >= static_cast<size_t>(this->arm_joint_count);
+    const bool shadow_only_state =
+        this->arm_bridge_require_live_state && this->arm_bridge_state_valid && !this->arm_bridge_state_from_backend;
 
-    if (this->arm_split_control_enabled && this->arm_bridge_require_state && !bridge_state_fresh &&
-        !this->arm_bridge_state_timeout_warned)
+    if (this->arm_split_control_enabled && this->arm_bridge_require_state)
     {
-        this->arm_bridge_state_timeout_warned = true;
-        std::cout << LOGGER::WARNING
-                  << "Arm bridge state is missing or stale. Using shadow arm state until bridge recovers."
-                  << std::endl;
-    }
-    else if (bridge_state_fresh)
-    {
-        this->arm_bridge_state_timeout_warned = false;
+        if (shadow_only_state)
+        {
+            if (!this->arm_bridge_shadow_mode_warned)
+            {
+                this->arm_bridge_shadow_mode_warned = true;
+                std::cout << LOGGER::WARNING
+                          << "Arm bridge topic is alive but reports shadow-only state. "
+                          << "Treating arm feedback as invalid until a real backend state arrives."
+                          << std::endl;
+            }
+        }
+        else if (!bridge_state_fresh && !this->arm_bridge_state_timeout_warned)
+        {
+            this->arm_bridge_state_timeout_warned = true;
+            std::cout << LOGGER::WARNING
+                      << "Arm bridge state is missing or stale. Using shadow arm state until bridge recovers."
+                      << std::endl;
+        }
+        else if (bridge_state_fresh)
+        {
+            this->arm_bridge_state_timeout_warned = false;
+            this->arm_bridge_shadow_mode_warned = false;
+        }
     }
 
     for (int i = 0; i < this->arm_joint_count; ++i)
@@ -764,6 +1383,8 @@ void RL_Real_Go2X5::WriteArmCommandToExternal(const RobotCommand<float> *command
     std::vector<float> arm_kp(static_cast<size_t>(this->arm_joint_count), 0.0f);
     std::vector<float> arm_kd(static_cast<size_t>(this->arm_joint_count), 0.0f);
     std::vector<float> arm_tau(static_cast<size_t>(this->arm_joint_count), 0.0f);
+    const auto fixed_kp = this->params.Get<std::vector<float>>("fixed_kp", {});
+    const auto fixed_kd = this->params.Get<std::vector<float>>("fixed_kd", {});
     for (int i = 0; i < this->arm_joint_count; ++i)
     {
         const int idx = this->arm_joint_start_index + i;
@@ -785,10 +1406,31 @@ void RL_Real_Go2X5::WriteArmCommandToExternal(const RobotCommand<float> *command
         arm_hold_enabled_local = this->arm_hold_enabled;
         arm_hold_local = this->arm_hold_position;
     }
-    if (arm_hold_enabled_local && arm_hold_local.size() == static_cast<size_t>(this->arm_joint_count))
+    const bool in_rl_locomotion = this->IsInRLLocomotionState();
+    const bool allow_passthrough = in_rl_locomotion || this->arm_safe_shutdown_active.load();
+    if (allow_passthrough)
     {
-        const auto fixed_kp = this->params.Get<std::vector<float>>("fixed_kp", {});
-        const auto fixed_kd = this->params.Get<std::vector<float>>("fixed_kd", {});
+        this->arm_non_rl_guard_warned = false;
+    }
+    else if (!this->arm_non_rl_guard_warned)
+    {
+        this->arm_non_rl_guard_warned = true;
+        std::cout << LOGGER::WARNING
+                  << "Arm passthrough blocked outside RL locomotion. Holding arm position until RL or shutdown sequence."
+                  << std::endl;
+    }
+
+    const bool force_hold = !allow_passthrough;
+    const bool use_hold_command = force_hold || arm_hold_enabled_local;
+    if (force_hold && arm_hold_local.size() != static_cast<size_t>(this->arm_joint_count))
+    {
+        std::cout << LOGGER::WARNING
+                  << "Arm passthrough blocked outside RL, but no valid arm hold pose is available."
+                  << std::endl;
+        return;
+    }
+    if (use_hold_command && arm_hold_local.size() == static_cast<size_t>(this->arm_joint_count))
+    {
         for (int i = 0; i < this->arm_joint_count; ++i)
         {
             const int idx = this->arm_joint_start_index + i;
@@ -803,6 +1445,34 @@ void RL_Real_Go2X5::WriteArmCommandToExternal(const RobotCommand<float> *command
             {
                 arm_kd[static_cast<size_t>(i)] = fixed_kd[static_cast<size_t>(idx)];
             }
+        }
+    }
+
+    if (!this->ClipArmBridgeCommandInPlace(
+            arm_q, arm_dq, arm_kp, arm_kd, arm_tau, arm_hold_local, "Arm bridge command"))
+    {
+        if (arm_hold_local.size() == static_cast<size_t>(this->arm_joint_count))
+        {
+            for (int i = 0; i < this->arm_joint_count; ++i)
+            {
+                const int idx = this->arm_joint_start_index + i;
+                arm_q[static_cast<size_t>(i)] = arm_hold_local[static_cast<size_t>(i)];
+                arm_dq[static_cast<size_t>(i)] = 0.0f;
+                arm_tau[static_cast<size_t>(i)] = 0.0f;
+                arm_kp[static_cast<size_t>(i)] =
+                    (idx >= 0 && idx < static_cast<int>(fixed_kp.size())) ? fixed_kp[static_cast<size_t>(idx)] : 0.0f;
+                arm_kd[static_cast<size_t>(i)] =
+                    (idx >= 0 && idx < static_cast<int>(fixed_kd.size())) ? fixed_kd[static_cast<size_t>(idx)] : 0.0f;
+            }
+            this->ClipArmBridgeCommandInPlace(
+                arm_q, arm_dq, arm_kp, arm_kd, arm_tau, arm_hold_local, "Arm hold fallback");
+        }
+        else
+        {
+            std::cout << LOGGER::WARNING
+                      << "Arm bridge command rejected and no valid hold fallback is available."
+                      << std::endl;
+            return;
         }
     }
 
@@ -857,22 +1527,33 @@ void RL_Real_Go2X5::ApplyArmHold(const std::vector<float>& target, const char* r
         return;
     }
 
-    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
-    this->arm_hold_position = target;
-    this->arm_joint_command_latest = target;
-    this->arm_hold_enabled = true;
-    if (!this->arm_command_initialized || this->arm_command_smoothed.size() != target.size())
+    std::vector<float> target_local = target;
+    std::vector<float> fallback_local;
     {
-        this->arm_command_smoothing_start = target;
-        this->arm_command_smoothing_target = target;
-        this->arm_command_smoothed = target;
+        std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+        fallback_local = this->arm_hold_position;
+    }
+    if (!this->ClipArmPoseTargetInPlace(target_local, fallback_local, reason))
+    {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(this->arm_command_mutex);
+    this->arm_hold_position = target_local;
+    this->arm_joint_command_latest = target_local;
+    this->arm_hold_enabled = true;
+    if (!this->arm_command_initialized || this->arm_command_smoothed.size() != target_local.size())
+    {
+        this->arm_command_smoothing_start = target_local;
+        this->arm_command_smoothing_target = target_local;
+        this->arm_command_smoothed = target_local;
         this->arm_command_initialized = true;
         this->arm_command_smoothing_counter = this->arm_command_smoothing_ticks;
     }
     else
     {
         this->arm_command_smoothing_start = this->arm_command_smoothed;
-        this->arm_command_smoothing_target = target;
+        this->arm_command_smoothing_target = target_local;
         this->arm_command_smoothing_counter = 0;
     }
 
@@ -919,62 +1600,65 @@ void RL_Real_Go2X5::GetState(RobotState<float> *state)
         joy_bits = this->unitree_joy;
     }
 
-    if (joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::A);
-    if (joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::B);
-    if (joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::X);
-    if (joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::Y);
-    if (joy_bits.components.L1) this->control.SetGamepad(Input::Gamepad::LB);
-    if (joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::RB);
-    if (joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LStick);
-    if (joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RStick);
-    if (joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
-    if (joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
-    if (joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
-    if (joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
-    if (joy_bits.components.L1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::LB_A);
-    if (joy_bits.components.L1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::LB_B);
-    if (joy_bits.components.L1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::LB_X);
-    if (joy_bits.components.L1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::LB_Y);
-    if (joy_bits.components.L1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LB_LStick);
-    if (joy_bits.components.L1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::LB_RStick);
-    if (joy_bits.components.L1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
-    if (joy_bits.components.L1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
-    if (joy_bits.components.L1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
-    if (joy_bits.components.L1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
-    if (joy_bits.components.R1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::RB_A);
-    if (joy_bits.components.R1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::RB_B);
-    if (joy_bits.components.R1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::RB_X);
-    if (joy_bits.components.R1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::RB_Y);
-    if (joy_bits.components.R1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::RB_LStick);
-    if (joy_bits.components.R1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RB_RStick);
-    if (joy_bits.components.R1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
-    if (joy_bits.components.R1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
-    if (joy_bits.components.R1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
-    if (joy_bits.components.R1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
-    if (joy_bits.components.L1 && joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
-
-    const bool fixed_cmd_latched =
-        (this->control.current_keyboard == Input::Keyboard::Num1 &&
-         this->control.last_keyboard == Input::Keyboard::Num1);
-    const bool joystick_active =
-        (std::fabs(joy_ly) > this->joystick_deadband) ||
-        (std::fabs(joy_lx) > this->joystick_deadband) ||
-        (std::fabs(joy_rx) > this->joystick_deadband);
-    if (!fixed_cmd_latched || joystick_active)
+    if (!this->UseExclusiveRealDeployControl())
     {
-        this->control.x = joy_ly;
-        this->control.y = -joy_lx;
-        this->control.yaw = -joy_rx;
-    }
+        if (joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::A);
+        if (joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::B);
+        if (joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::X);
+        if (joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::Y);
+        if (joy_bits.components.L1) this->control.SetGamepad(Input::Gamepad::LB);
+        if (joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::RB);
+        if (joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LStick);
+        if (joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RStick);
+        if (joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::DPadUp);
+        if (joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::DPadDown);
+        if (joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::DPadLeft);
+        if (joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::DPadRight);
+        if (joy_bits.components.L1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::LB_A);
+        if (joy_bits.components.L1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::LB_B);
+        if (joy_bits.components.L1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::LB_X);
+        if (joy_bits.components.L1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::LB_Y);
+        if (joy_bits.components.L1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::LB_LStick);
+        if (joy_bits.components.L1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::LB_RStick);
+        if (joy_bits.components.L1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::LB_DPadUp);
+        if (joy_bits.components.L1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::LB_DPadDown);
+        if (joy_bits.components.L1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::LB_DPadLeft);
+        if (joy_bits.components.L1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::LB_DPadRight);
+        if (joy_bits.components.R1 && joy_bits.components.A) this->control.SetGamepad(Input::Gamepad::RB_A);
+        if (joy_bits.components.R1 && joy_bits.components.B) this->control.SetGamepad(Input::Gamepad::RB_B);
+        if (joy_bits.components.R1 && joy_bits.components.X) this->control.SetGamepad(Input::Gamepad::RB_X);
+        if (joy_bits.components.R1 && joy_bits.components.Y) this->control.SetGamepad(Input::Gamepad::RB_Y);
+        if (joy_bits.components.R1 && joy_bits.components.F1) this->control.SetGamepad(Input::Gamepad::RB_LStick);
+        if (joy_bits.components.R1 && joy_bits.components.F2) this->control.SetGamepad(Input::Gamepad::RB_RStick);
+        if (joy_bits.components.R1 && joy_bits.components.up) this->control.SetGamepad(Input::Gamepad::RB_DPadUp);
+        if (joy_bits.components.R1 && joy_bits.components.down) this->control.SetGamepad(Input::Gamepad::RB_DPadDown);
+        if (joy_bits.components.R1 && joy_bits.components.left) this->control.SetGamepad(Input::Gamepad::RB_DPadLeft);
+        if (joy_bits.components.R1 && joy_bits.components.right) this->control.SetGamepad(Input::Gamepad::RB_DPadRight);
+        if (joy_bits.components.L1 && joy_bits.components.R1) this->control.SetGamepad(Input::Gamepad::LB_RB);
 
-    if (this->control.navigation_mode)
-    {
-        std::lock_guard<std::mutex> cmd_lock(this->cmd_vel_mutex);
-        if (this->cmd_vel_has_filtered)
+        const bool fixed_cmd_latched =
+            (this->control.current_keyboard == Input::Keyboard::Num1 &&
+             this->control.last_keyboard == Input::Keyboard::Num1);
+        const bool joystick_active =
+            (std::fabs(joy_ly) > this->joystick_deadband) ||
+            (std::fabs(joy_lx) > this->joystick_deadband) ||
+            (std::fabs(joy_rx) > this->joystick_deadband);
+        if (!fixed_cmd_latched || joystick_active)
         {
-            this->control.x = static_cast<float>(this->cmd_vel_filtered.linear.x);
-            this->control.y = static_cast<float>(this->cmd_vel_filtered.linear.y);
-            this->control.yaw = static_cast<float>(this->cmd_vel_filtered.angular.z);
+            this->control.x = joy_ly;
+            this->control.y = -joy_lx;
+            this->control.yaw = -joy_rx;
+        }
+
+        if (this->control.navigation_mode)
+        {
+            std::lock_guard<std::mutex> cmd_lock(this->cmd_vel_mutex);
+            if (this->cmd_vel_has_filtered)
+            {
+                this->control.x = static_cast<float>(this->cmd_vel_filtered.linear.x);
+                this->control.y = static_cast<float>(this->cmd_vel_filtered.linear.y);
+                this->control.yaw = static_cast<float>(this->cmd_vel_filtered.angular.z);
+            }
         }
     }
 
@@ -1009,6 +1693,9 @@ void RL_Real_Go2X5::GetState(RobotState<float> *state)
 
 void RL_Real_Go2X5::SetCommand(const RobotCommand<float> *command)
 {
+    RobotCommand<float> command_local = *command;
+    this->ClipWholeBodyCommand(&command_local, "Real deploy whole-body command");
+
     for (int i = 0; i < this->params.Get<int>("num_of_dofs"); ++i)
     {
         const int mapped = this->params.Get<std::vector<int>>("joint_mapping")[i];
@@ -1025,15 +1712,15 @@ void RL_Real_Go2X5::SetCommand(const RobotCommand<float> *command)
         else
         {
             this->unitree_low_command.motor_cmd()[mapped].mode() = 0x01;
-            this->unitree_low_command.motor_cmd()[mapped].q() = command->motor_command.q[i];
-            this->unitree_low_command.motor_cmd()[mapped].dq() = command->motor_command.dq[i];
-            this->unitree_low_command.motor_cmd()[mapped].kp() = command->motor_command.kp[i];
-            this->unitree_low_command.motor_cmd()[mapped].kd() = command->motor_command.kd[i];
-            this->unitree_low_command.motor_cmd()[mapped].tau() = command->motor_command.tau[i];
+            this->unitree_low_command.motor_cmd()[mapped].q() = command_local.motor_command.q[i];
+            this->unitree_low_command.motor_cmd()[mapped].dq() = command_local.motor_command.dq[i];
+            this->unitree_low_command.motor_cmd()[mapped].kp() = command_local.motor_command.kp[i];
+            this->unitree_low_command.motor_cmd()[mapped].kd() = command_local.motor_command.kd[i];
+            this->unitree_low_command.motor_cmd()[mapped].tau() = command_local.motor_command.tau[i];
         }
     }
 
-    this->WriteArmCommandToExternal(command);
+    this->WriteArmCommandToExternal(&command_local);
 
     this->unitree_low_command.crc() = Crc32Core((uint32_t *)&unitree_low_command, (sizeof(unitree_go::msg::dds_::LowCmd_) >> 2) - 1);
     lowcmd_publisher->Write(unitree_low_command);
@@ -1098,7 +1785,7 @@ void RL_Real_Go2X5::RobotControl()
         this->control.current_keyboard = this->control.last_keyboard;
     }
 
-    if (this->control.current_keyboard == Input::Keyboard::Num3)
+    if (!this->UseExclusiveRealDeployControl() && this->control.current_keyboard == Input::Keyboard::Num3)
     {
         int arm_command_size_local = 0;
         {
@@ -1119,7 +1806,7 @@ void RL_Real_Go2X5::RobotControl()
         this->control.current_keyboard = this->control.last_keyboard;
     }
 
-    if (this->control.current_keyboard == Input::Keyboard::Num4)
+    if (!this->UseExclusiveRealDeployControl() && this->control.current_keyboard == Input::Keyboard::Num4)
     {
         {
             std::lock_guard<std::mutex> lock(this->arm_command_mutex);
@@ -1138,6 +1825,10 @@ void RL_Real_Go2X5::RobotControl()
 void RL_Real_Go2X5::MaybePublishKey1CmdVel()
 {
 #if !defined(USE_CMAKE) && defined(USE_ROS)
+    if (this->UseExclusiveRealDeployControl())
+    {
+        return;
+    }
     if (!this->control.navigation_mode)
     {
         this->key1_navigation_cmd_published = false;
@@ -1198,8 +1889,55 @@ void RL_Real_Go2X5::MaybePublishKey1CmdVel()
 #endif
 }
 
+void RL_Real_Go2X5::RecordPolicyInferenceTick()
+{
+    const auto now = std::chrono::steady_clock::now();
+    if (this->last_policy_inference_stamp.time_since_epoch().count() > 0)
+    {
+        const double dt_sec =
+            std::chrono::duration_cast<std::chrono::duration<double>>(now - this->last_policy_inference_stamp).count();
+        if (dt_sec > 1e-6)
+        {
+            this->last_policy_inference_hz = static_cast<float>(1.0 / dt_sec);
+        }
+    }
+    this->last_policy_inference_stamp = now;
+
+    if (this->policy_inference_log_enabled && this->last_policy_inference_hz > 0.0f)
+    {
+        std::cout << "\r\033[K" << LOGGER::INFO << "Policy inference frequency: "
+                  << std::fixed << std::setprecision(2) << this->last_policy_inference_hz
+                  << " Hz" << std::flush;
+    }
+}
+
+void RL_Real_Go2X5::HandleLoopException(const std::string& loop_name, const std::string& error)
+{
+    bool expected = false;
+    if (!this->loop_exception_requested.compare_exchange_strong(expected, true))
+    {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(this->loop_exception_mutex);
+        this->loop_exception_message = loop_name + ": " + error;
+    }
+    std::cout << LOGGER::ERROR << "Loop exception captured, requesting safe shutdown: "
+              << this->loop_exception_message << std::endl;
+}
+
+bool RL_Real_Go2X5::LoopExceptionRequested() const
+{
+    return this->loop_exception_requested.load();
+}
+
 void RL_Real_Go2X5::RunModel()
 {
+    if (this->LoopExceptionRequested())
+    {
+        return;
+    }
     if (!this->rl_init_done)
     {
         this->arm_runtime_params_ready = false;
@@ -1210,6 +1948,7 @@ void RL_Real_Go2X5::RunModel()
         // Re-sync arm settings after policy config (go2_x5/robot_lab/config.yaml) is loaded.
         this->InitializeArmCommandState();
         this->InitializeArmChannelConfig();
+        this->InitializeRealDeploySafetyConfig();
         this->ValidateJointMappingOrThrow("go2_x5/robot_lab/config.yaml");
         this->SetupArmCommandSubscriber();
         this->SetupArmBridgeInterface();
@@ -1221,7 +1960,7 @@ void RL_Real_Go2X5::RunModel()
     this->obs.commands = {this->control.x, this->control.y, this->control.yaw};
 
 #if !defined(USE_CMAKE) && defined(USE_ROS)
-    if (this->control.navigation_mode)
+    if (!this->UseExclusiveRealDeployControl() && this->control.navigation_mode)
     {
         std::lock_guard<std::mutex> lock(this->cmd_vel_mutex);
         const auto cmd = this->cmd_vel_has_filtered ? this->cmd_vel_filtered : this->cmd_vel;
@@ -1309,6 +2048,7 @@ void RL_Real_Go2X5::RunModel()
 
     this->obs.actions = this->Forward();
     this->ComputeOutput(this->obs.actions, this->output_dof_pos, this->output_dof_vel, this->output_dof_tau);
+    this->RecordPolicyInferenceTick();
 
     if (!this->output_dof_pos.empty() && arm_hold_enabled_local && !arm_hold_local.empty())
     {
@@ -1402,6 +2142,36 @@ std::vector<float> RL_Real_Go2X5::Forward()
     else
     {
         actions = this->model->forward({clamped_obs});
+    }
+
+    const auto action_scale = this->params.Get<std::vector<float>>("action_scale", {});
+    const size_t expected_action_dim =
+        !action_scale.empty()
+            ? action_scale.size()
+            : static_cast<size_t>(std::max(0, this->params.Get<int>("num_of_dofs")));
+    if (expected_action_dim > 0 && actions.size() != expected_action_dim)
+    {
+        std::cout << LOGGER::ERROR
+                  << "Policy action dimension mismatch: expect " << expected_action_dim
+                  << ", got " << actions.size()
+                  << ". Use zero action fallback." << std::endl;
+        actions.assign(expected_action_dim, 0.0f);
+    }
+
+    bool non_finite_action = false;
+    for (float& value : actions)
+    {
+        if (!std::isfinite(value))
+        {
+            value = 0.0f;
+            non_finite_action = true;
+        }
+    }
+    if (non_finite_action)
+    {
+        std::cout << LOGGER::WARNING
+                  << "Policy produced non-finite action. Replace invalid entries with zero."
+                  << std::endl;
     }
 
     if (!this->params.Get<std::vector<float>>("clip_actions_upper").empty() && !this->params.Get<std::vector<float>>("clip_actions_lower").empty())
@@ -1586,6 +2356,18 @@ void RL_Real_Go2X5::CmdvelCallback(
 #endif
 )
 {
+    if (this->UseExclusiveRealDeployControl())
+    {
+        if (!this->cmd_vel_input_ignored_warned)
+        {
+            this->cmd_vel_input_ignored_warned = true;
+            std::cout << LOGGER::WARNING
+                      << "Ignore /cmd_vel in exclusive real deploy control mode. Use keyboard 0/1/2 only."
+                      << std::endl;
+        }
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(this->cmd_vel_mutex);
     this->cmd_vel = *msg;
     if (!this->cmd_vel_has_filtered)
@@ -1629,6 +2411,17 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
                   << " values, got " << msg->data.size() << std::endl;
         return;
     }
+    std::vector<float> target(static_cast<size_t>(this->arm_command_size), 0.0f);
+    const size_t count = static_cast<size_t>(this->arm_command_size);
+    for (size_t i = 0; i < count; ++i)
+    {
+        target[i] = msg->data[i];
+    }
+    if (!this->ClipArmPoseTargetInPlace(target, this->arm_hold_position, "/arm_joint_pos_cmd"))
+    {
+        return;
+    }
+
     if (this->arm_joint_command_latest.size() != static_cast<size_t>(this->arm_command_size))
     {
         this->arm_joint_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
@@ -1638,11 +2431,10 @@ void RL_Real_Go2X5::ArmJointCommandCallback(
         this->arm_topic_command_latest.assign(static_cast<size_t>(this->arm_command_size), 0.0f);
     }
 
-    const size_t count = static_cast<size_t>(this->arm_command_size);
     for (size_t i = 0; i < count; ++i)
     {
-        this->arm_joint_command_latest[i] = msg->data[i];
-        this->arm_topic_command_latest[i] = msg->data[i];
+        this->arm_joint_command_latest[i] = target[i];
+        this->arm_topic_command_latest[i] = target[i];
     }
     this->arm_topic_command_received = true;
 }
@@ -1664,6 +2456,7 @@ void RL_Real_Go2X5::ArmBridgeStateCallback(
     std::vector<float> q(n, 0.0f);
     std::vector<float> dq(n, 0.0f);
     std::vector<float> tau(n, 0.0f);
+    bool state_from_backend = false;
 
     if (msg->data.size() >= 3 * n)
     {
@@ -1680,18 +2473,41 @@ void RL_Real_Go2X5::ArmBridgeStateCallback(
         return;
     }
 
+    if (msg->data.size() == (3 * n + 1) || msg->data.size() == (n + 1))
+    {
+        state_from_backend = msg->data.back() > 0.5f;
+    }
+
+    if (!this->ValidateArmBridgeStateSample(q, dq, tau, "Arm bridge state"))
+    {
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(this->arm_external_state_mutex);
     this->arm_external_state_q = std::move(q);
     this->arm_external_state_dq = std::move(dq);
     this->arm_external_state_tau = std::move(tau);
     this->arm_bridge_state_valid = true;
+    this->arm_bridge_state_from_backend = state_from_backend;
     this->arm_bridge_state_stamp = std::chrono::steady_clock::now();
     this->arm_bridge_state_timeout_warned = false;
-    if (!this->arm_bridge_state_stream_logged)
+    if (this->arm_bridge_state_from_backend)
     {
-        this->arm_bridge_state_stream_logged = true;
-        std::cout << LOGGER::INFO << "Arm bridge state stream detected: topic="
-                  << this->arm_bridge_state_topic << ", dof=" << this->arm_joint_count
+        this->arm_bridge_shadow_mode_warned = false;
+        if (!this->arm_bridge_state_stream_logged)
+        {
+            this->arm_bridge_state_stream_logged = true;
+            std::cout << LOGGER::INFO << "Arm bridge state stream detected: topic="
+                      << this->arm_bridge_state_topic << ", dof=" << this->arm_joint_count
+                      << std::endl;
+        }
+    }
+    else if (this->arm_bridge_require_live_state && !this->arm_bridge_shadow_mode_warned)
+    {
+        this->arm_bridge_shadow_mode_warned = true;
+        std::cout << LOGGER::WARNING
+                  << "Arm bridge state topic is publishing shadow-only feedback. "
+                  << "Real arm feedback is still considered unavailable."
                   << std::endl;
     }
 }
@@ -1722,7 +2538,7 @@ int main(int argc, char **argv)
     signal(SIGINT, signalHandlerGo2X5);
     RL_Real_Go2X5 rl_sar(argc, argv);
     ros::Rate rate(200.0);
-    while (ros::ok() && !g_shutdown_requested_go2_x5)
+    while (ros::ok() && !g_shutdown_requested_go2_x5 && !rl_sar.LoopExceptionRequested())
     {
         ros::spinOnce();
         rate.sleep();
@@ -1742,7 +2558,7 @@ int main(int argc, char **argv)
     std::cout << LOGGER::INFO << "[Boot] RL_Real_Go2X5 constructed" << std::endl;
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(rl_sar->ros2_node);
-    while (rclcpp::ok() && !g_shutdown_requested_go2_x5)
+    while (rclcpp::ok() && !g_shutdown_requested_go2_x5 && !rl_sar->LoopExceptionRequested())
     {
         executor.spin_some();
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1752,7 +2568,7 @@ int main(int argc, char **argv)
 #elif defined(USE_CMAKE) || !defined(USE_ROS)
     signal(SIGINT, signalHandlerGo2X5);
     RL_Real_Go2X5 rl_sar(argc, argv);
-    while (!g_shutdown_requested_go2_x5) { sleep(1); }
+    while (!g_shutdown_requested_go2_x5 && !rl_sar.LoopExceptionRequested()) { sleep(1); }
     std::cout << LOGGER::INFO << "Exiting..." << std::endl;
 #endif
 

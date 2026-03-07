@@ -40,10 +40,10 @@ int main()
     const std::string bridge_content = ReadAll(bridge_file);
 
     RequireContains(launch_content, "on_exit=Shutdown(reason=\"arx_x5_bridge exited\")", launch_file);
-    RequireContains(launch_content, "DeclareLaunchArgument(\"arm_require_sdk\", default_value=\"false\")", launch_file);
+    RequireContains(launch_content, "DeclareLaunchArgument(\"arm_require_sdk\", default_value=\"true\")", launch_file);
     RequireContains(
         launch_content,
-        "DeclareLaunchArgument(\"arm_require_initial_state\", default_value=\"false\")",
+        "DeclareLaunchArgument(\"arm_require_initial_state\", default_value=\"true\")",
         launch_file);
     RequireContains(
         launch_content,
@@ -63,6 +63,8 @@ int main()
     RequireContains(bridge_content, "self.declare_parameter(\"probe_backend_before_init\", True)", bridge_file);
     RequireContains(bridge_content, "self.declare_parameter(\"probe_timeout_sec\", 5.0)", bridge_file);
     RequireContains(bridge_content, "self.declare_parameter(\"accept_commands\", False)", bridge_file);
+    RequireContains(bridge_content, "self.state_from_backend = False", bridge_file);
+    RequireContains(bridge_content, "msg.data = list(self.last_q) + list(self.last_dq) + list(self.last_tau) + [", bridge_file);
 
     std::cout << "go2_x5 arm bridge defaults test passed." << std::endl;
     return 0;

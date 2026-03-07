@@ -786,6 +786,10 @@ if(USE_CMAKE AND BUILD_TESTING)
     target_link_libraries(test_loop_timing_precision Threads::Threads)
     add_test(NAME test_loop_timing_precision COMMAND test_loop_timing_precision)
 
+    add_executable(test_loop_exception_handler test/test_loop_exception_handler.cpp)
+    target_link_libraries(test_loop_exception_handler Threads::Threads)
+    add_test(NAME test_loop_exception_handler COMMAND test_loop_exception_handler)
+
     add_executable(test_joint_mapping_validation test/test_joint_mapping_validation.cpp)
     add_test(NAME test_joint_mapping_validation COMMAND test_joint_mapping_validation)
 
@@ -799,6 +803,10 @@ if(USE_CMAKE AND BUILD_TESTING)
     add_executable(test_go2_x5_arm_lock_defaults test/test_go2_x5_arm_lock_defaults.cpp)
     target_compile_definitions(test_go2_x5_arm_lock_defaults PRIVATE RL_SAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     add_test(NAME test_go2_x5_arm_lock_defaults COMMAND test_go2_x5_arm_lock_defaults)
+
+    add_executable(test_go2_x5_arm_safety_guards test/test_go2_x5_arm_safety_guards.cpp)
+    target_compile_definitions(test_go2_x5_arm_safety_guards PRIVATE RL_SAR_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME test_go2_x5_arm_safety_guards COMMAND test_go2_x5_arm_safety_guards)
 endif()
 
 # add_executable(test_observation_buffer test/test_observation_buffer.cpp)

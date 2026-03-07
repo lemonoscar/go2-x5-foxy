@@ -60,6 +60,23 @@ def _default_arch_lib_dir(sdk_root: str) -> str:
     return os.path.join(sdk_root, "lib", arch)
 
 
+def _default_joint_pos_limits(model: str, joint_count: int) -> Tuple[List[float], List[float]]:
+    normalized = str(model).upper()
+    if joint_count == 6 and (normalized.startswith("X5") or normalized.startswith("L5")):
+        return (
+            [-3.14, -0.05, -0.1, -1.6, -1.57, -2.0],
+            [2.618, 3.50, 3.20, 1.55, 1.57, 2.0],
+        )
+    return ([-math.inf] * joint_count, [math.inf] * joint_count)
+
+
+def _load_limit_list(raw_value: Any, fallback: Sequence[float], expected_len: int) -> List[float]:
+    values = _to_float_list(raw_value, expected_len)
+    if values is None or len(values) != expected_len:
+        return [float(x) for x in fallback[:expected_len]]
+    return values
+
+
 class _ProbeLogger:
     def __init__(self, prefix: str = "[arx_probe]"):
         self.prefix = prefix
@@ -459,6 +476,12 @@ class ArxX5BridgeNode(Node):
         self.declare_parameter("enable_background_send_recv", True)
         self.declare_parameter("controller_dt", 0.002)
         self.declare_parameter("init_to_home", False)
+        self.declare_parameter("joint_pos_min", [])
+        self.declare_parameter("joint_pos_max", [])
+        self.declare_parameter("joint_vel_abs_limit", 20.0)
+        self.declare_parameter("kp_abs_limit", 100.0)
+        self.declare_parameter("kd_abs_limit", 20.0)
+        self.declare_parameter("tau_abs_limit", 20.0)
 
         self.model = str(self.get_parameter("model").value)
         self.interface_name = str(self.get_parameter("interface_name").value)
@@ -481,6 +504,13 @@ class ArxX5BridgeNode(Node):
         self.enable_background_send_recv = bool(self.get_parameter("enable_background_send_recv").value)
         self.controller_dt = float(self.get_parameter("controller_dt").value)
         self.init_to_home = bool(self.get_parameter("init_to_home").value)
+        default_lower, default_upper = _default_joint_pos_limits(self.model, self.joint_count)
+        self.joint_pos_min = _load_limit_list(self.get_parameter("joint_pos_min").value, default_lower, self.joint_count)
+        self.joint_pos_max = _load_limit_list(self.get_parameter("joint_pos_max").value, default_upper, self.joint_count)
+        self.joint_vel_abs_limit = max(0.0, float(self.get_parameter("joint_vel_abs_limit").value))
+        self.kp_abs_limit = max(0.0, float(self.get_parameter("kp_abs_limit").value))
+        self.kd_abs_limit = max(0.0, float(self.get_parameter("kd_abs_limit").value))
+        self.tau_abs_limit = max(0.0, float(self.get_parameter("tau_abs_limit").value))
 
         self._prepare_sdk_environment()
 
@@ -493,6 +523,8 @@ class ArxX5BridgeNode(Node):
         self.recv_cmd = False
         self.ignore_cmd_warned = False
         self.last_stale_warn_stamp = 0.0
+        self.last_invalid_cmd_warn_stamp = 0.0
+        self.state_from_backend = False
 
         self.backend = None
         if self.dry_run:
@@ -534,9 +566,18 @@ class ArxX5BridgeNode(Node):
                         f"joint_count override: launch={self.joint_count}, sdk={self.backend.joint_count}"
                     )
                     self.joint_count = int(self.backend.joint_count)
+                    default_lower, default_upper = _default_joint_pos_limits(self.model, self.joint_count)
+                    self.joint_pos_min = _load_limit_list(
+                        self.get_parameter("joint_pos_min").value, default_lower, self.joint_count
+                    )
+                    self.joint_pos_max = _load_limit_list(
+                        self.get_parameter("joint_pos_max").value, default_upper, self.joint_count
+                    )
                     self.last_q = [0.0] * self.joint_count
                     self.last_dq = [0.0] * self.joint_count
                     self.last_tau = [0.0] * self.joint_count
+                    self.last_kp = [0.0] * self.joint_count
+                    self.last_kd = [0.0] * self.joint_count
 
         self.sub_cmd = self.create_subscription(Float32MultiArray, self.cmd_topic, self._on_cmd, 10)
         self.pub_state = self.create_publisher(Float32MultiArray, self.state_topic, 10)
@@ -555,6 +596,83 @@ class ArxX5BridgeNode(Node):
                 "ARX bridge is in read-only mode. Incoming /arx_x5/joint_cmd will be ignored until "
                 "accept_commands:=true is set on startup."
             )
+
+    def _warn_invalid_command(self, message: str) -> None:
+        now = time.monotonic()
+        if (now - self.last_invalid_cmd_warn_stamp) > 1.0:
+            self.last_invalid_cmd_warn_stamp = now
+            self.get_logger().warning(message)
+
+    def _clip_command(
+        self,
+        q: Sequence[float],
+        dq: Sequence[float],
+        kp: Sequence[float],
+        kd: Sequence[float],
+        tau: Sequence[float],
+    ) -> Tuple[List[float], List[float], List[float], List[float], List[float], bool]:
+        q_out = list(q[: self.joint_count])
+        dq_out = list(dq[: self.joint_count])
+        kp_out = list(kp[: self.joint_count])
+        kd_out = list(kd[: self.joint_count])
+        tau_out = list(tau[: self.joint_count])
+        clipped = False
+        first_reason = ""
+
+        def note(reason: str) -> None:
+            nonlocal clipped, first_reason
+            clipped = True
+            if not first_reason:
+                first_reason = reason
+
+        for i in range(self.joint_count):
+            qi = float(q_out[i])
+            dqi = float(dq_out[i])
+            kpi = float(kp_out[i])
+            kdi = float(kd_out[i])
+            taui = float(tau_out[i])
+            if not math.isfinite(qi):
+                qi = self.last_q[i]
+                note(f"joint[{i}] position is not finite")
+            if not math.isfinite(dqi):
+                dqi = 0.0
+                note(f"joint[{i}] velocity is not finite")
+            if not math.isfinite(kpi):
+                kpi = self.last_kp[i]
+                note(f"joint[{i}] kp is not finite")
+            if not math.isfinite(kdi):
+                kdi = self.last_kd[i]
+                note(f"joint[{i}] kd is not finite")
+            if not math.isfinite(taui):
+                taui = 0.0
+                note(f"joint[{i}] tau is not finite")
+
+            q_clamped = min(max(qi, self.joint_pos_min[i]), self.joint_pos_max[i])
+            dq_clamped = min(max(dqi, -self.joint_vel_abs_limit), self.joint_vel_abs_limit)
+            kp_clamped = min(max(kpi, 0.0), self.kp_abs_limit)
+            kd_clamped = min(max(kdi, 0.0), self.kd_abs_limit)
+            tau_clamped = min(max(taui, -self.tau_abs_limit), self.tau_abs_limit)
+
+            if abs(q_clamped - qi) > 1e-6:
+                note(f"joint[{i}] position exceeds [{self.joint_pos_min[i]}, {self.joint_pos_max[i]}]")
+            if abs(dq_clamped - dqi) > 1e-6:
+                note(f"joint[{i}] velocity exceeds limit {self.joint_vel_abs_limit}")
+            if abs(kp_clamped - kpi) > 1e-6:
+                note(f"joint[{i}] kp outside [0, {self.kp_abs_limit}]")
+            if abs(kd_clamped - kdi) > 1e-6:
+                note(f"joint[{i}] kd outside [0, {self.kd_abs_limit}]")
+            if abs(tau_clamped - taui) > 1e-6:
+                note(f"joint[{i}] tau exceeds limit {self.tau_abs_limit}")
+
+            q_out[i] = q_clamped
+            dq_out[i] = dq_clamped
+            kp_out[i] = kp_clamped
+            kd_out[i] = kd_clamped
+            tau_out[i] = tau_clamped
+
+        if clipped:
+            self._warn_invalid_command(f"Clip arm cmd to deploy limits: {first_reason}.")
+        return q_out, dq_out, kp_out, kd_out, tau_out, clipped
 
     def _probe_backend(self) -> Tuple[bool, str]:
         probe_config = {
@@ -648,6 +766,8 @@ class ArxX5BridgeNode(Node):
         if len(msg.data) >= 5 * n:
             tau = [float(x) for x in msg.data[4 * n:5 * n]]
 
+        q, dq, kp, kd, tau, _ = self._clip_command(q, dq, kp, kd, tau)
+
         self.last_q = q
         self.last_dq = dq
         self.last_kp = kp
@@ -658,7 +778,9 @@ class ArxX5BridgeNode(Node):
 
     def _publish_state(self) -> None:
         msg = Float32MultiArray()
-        msg.data = list(self.last_q) + list(self.last_dq) + list(self.last_tau)
+        msg.data = list(self.last_q) + list(self.last_dq) + list(self.last_tau) + [
+            1.0 if self.state_from_backend else 0.0
+        ]
         self.pub_state.publish(msg)
 
     def _on_timer(self) -> None:
@@ -682,14 +804,17 @@ class ArxX5BridgeNode(Node):
             if not sent:
                 self.get_logger().warning("ARX command send failed; keep shadow state.")
 
+        state_from_backend = False
         if self.backend is not None:
             q, dq, tau = self.backend.read_state(self.joint_count)
             if q is not None and len(q) == self.joint_count:
                 self.last_q = q
+                state_from_backend = True
             if dq is not None and len(dq) == self.joint_count:
                 self.last_dq = dq
             if tau is not None and len(tau) == self.joint_count:
                 self.last_tau = tau
+        self.state_from_backend = state_from_backend
 
         for i in range(self.joint_count):
             if not math.isfinite(self.last_q[i]):

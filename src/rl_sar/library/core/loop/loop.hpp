@@ -26,8 +26,18 @@
 class LoopFunc
 {
 public:
-    LoopFunc(const std::string &name, float period, std::function<void()> func, int bindCPU = -1)
-        : _name(name), _period(period), _func(func), _bindCPU(bindCPU), _running(false) {}
+    LoopFunc(
+        const std::string &name,
+        float period,
+        std::function<void()> func,
+        int bindCPU = -1,
+        std::function<void(const std::string&, const std::string&)> exception_handler = {})
+        : _name(name),
+          _period(period),
+          _func(func),
+          _bindCPU(bindCPU),
+          _running(false),
+          _exception_handler(std::move(exception_handler)) {}
 
     void start()
     {
@@ -94,14 +104,41 @@ private:
     std::mutex _mutex;
     std::condition_variable _cv;
     std::thread _thread;
+    std::function<void(const std::string&, const std::string&)> _exception_handler;
 
     void loop()
     {
         while (_running)
         {
             auto start = std::chrono::steady_clock::now();
-
-            _func();
+            try
+            {
+                _func();
+            }
+            catch (const std::exception& e)
+            {
+                const std::string error = e.what();
+                std::cout << LOGGER::ERROR << "[Loop] Exception in " << _name << ": "
+                          << error << std::endl;
+                if (_exception_handler)
+                {
+                    _exception_handler(_name, error);
+                }
+                _running = false;
+                break;
+            }
+            catch (...)
+            {
+                const std::string error = "unknown exception";
+                std::cout << LOGGER::ERROR << "[Loop] Exception in " << _name << ": "
+                          << error << std::endl;
+                if (_exception_handler)
+                {
+                    _exception_handler(_name, error);
+                }
+                _running = false;
+                break;
+            }
 
             auto end = std::chrono::steady_clock::now();
             auto sleepTime = ComputeSleepDuration(_period, end - start);
